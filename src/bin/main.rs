@@ -3,10 +3,9 @@
 
 use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memory layout
 
-use cortex_m_rt::entry;
 use stm32f4xx_hal as hal;
 
-use crate::hal::{pac, prelude::*};
+use crate::hal::{prelude::*};
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -28,7 +27,7 @@ fn main() -> ! {
     let mut delay = cp.SYST.delay(&clocks);
 
     loop {
-        // On for 1s, off for 1s.
+        // On for 0.2s, off for 1s.
         led.set_high();
         delay.delay_ms(1000_u32);
         led.set_low();
