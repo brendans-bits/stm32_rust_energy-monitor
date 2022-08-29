@@ -1,41 +1,33 @@
 #![no_main]
 #![no_std]
 
-
 use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memory layout
 
 use stm32f4xx_hal as hal;
 
 use crate::hal::{
-    prelude::*,
-    serial::{
-        Config,
-        Serial
-    },
     adc::{
-        config::{
-            AdcConfig, 
-            SampleTime
-        }, 
-        Adc
+        config::{AdcConfig, SampleTime},
+        Adc,
     },
+    prelude::*,
+    serial::{Config, Serial},
 };
 
 use core::fmt::Write;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
-
     defmt::println!("Hello, world!");
 
     let dp = hal::pac::Peripherals::take().unwrap();
     let cp = cortex_m::peripheral::Peripherals::take().unwrap();
 
-    // Set up the LED. On the BlackPill it's connected to pin PC13.
+    // Set up the LED on pin PC13.
     let gpioc = dp.GPIOC.split();
     let mut led = gpioc.pc13.into_push_pull_output();
 
-    // Set up the system clock. We want to run at 48MHz for this one.
+    // Set up the system clock to run at 100MHz
     let rcc = dp.RCC.constrain();
     let clocks = rcc.cfgr.sysclk(100.MHz()).freeze();
 
@@ -46,7 +38,7 @@ fn main() -> ! {
     let gpioa = dp.GPIOA.split();
     let tx_pin = gpioa.pa9.into_alternate();
 
-    //create an object for serial transmission
+    // Create a tx abstraction for serial transmission
     let mut tx = Serial::tx(
         dp.USART1,
         tx_pin,
@@ -54,25 +46,25 @@ fn main() -> ! {
             .baudrate(115200.bps())
             .wordlength_8()
             .parity_none(),
-            &clocks,
-        )
-      .unwrap();
+        &clocks,
+    )
+    .unwrap();
 
-    //Write a line to serial output
+    // Write a line to serial output
     writeln!(&mut tx, "Starting \r").unwrap();
 
-    //Set up pin for voltage and current measurements
+    // Set up pin for voltage and current measurements
     let pin_voltage = gpioa.pa7.into_analog();
     let pin_current = gpioa.pa1.into_analog();
 
-    //Set up ADC
+    // Set up ADC
     let mut adc = Adc::adc1(dp.ADC1, true, AdcConfig::default());
 
-    //Take a sample of the voltage and current measurements
+    // Take a sample of the voltage and current measurements
     let sample_voltage = &adc.convert(&pin_voltage, SampleTime::Cycles_480);
     let sample_current = &adc.convert(&pin_current, SampleTime::Cycles_480);
 
-    //Write the sample values to serial output
+    // Write the sample values to serial output
     writeln!(tx, "{} \r", sample_voltage).unwrap();
     writeln!(tx, "{} \r", sample_current).unwrap();
 
@@ -84,5 +76,4 @@ fn main() -> ! {
         delay.delay_ms(200_u32);
         writeln!(&mut tx, "Blink \r").unwrap();
     }
-
 }
