@@ -61,17 +61,20 @@ fn main() -> ! {
     //Write a line to serial output
     writeln!(&mut tx, "Starting \r").unwrap();
 
-    //Set up pin for voltage measurement
-    let voltage = gpioa.pa7.into_analog();
+    //Set up pin for voltage and current measurements
+    let pin_voltage = gpioa.pa7.into_analog();
+    let pin_current = gpioa.pa1.into_analog();
 
     //Set up ADC
     let mut adc = Adc::adc1(dp.ADC1, true, AdcConfig::default());
 
-    //Take a sample of the voltage measurement
-    let sample = &adc.convert(&voltage, SampleTime::Cycles_480);
+    //Take a sample of the voltage and current measurements
+    let sample_voltage = &adc.convert(&pin_voltage, SampleTime::Cycles_480);
+    let sample_current = &adc.convert(&pin_current, SampleTime::Cycles_480);
 
-    //Write the sample value to serial output
-    writeln!(tx, "{} \r", sample).unwrap();
+    //Write the sample values to serial output
+    writeln!(tx, "{} \r", sample_voltage).unwrap();
+    writeln!(tx, "{} \r", sample_current).unwrap();
 
     loop {
         // On for 0.2s, off for 1s.
