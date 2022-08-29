@@ -8,7 +8,17 @@ use stm32f4xx_hal as hal;
 
 use crate::hal::{
     prelude::*,
-    serial::{Config, Serial},
+    serial::{
+        Config,
+        Serial
+    },
+    adc::{
+        config::{
+            AdcConfig, 
+            SampleTime
+        }, 
+        Adc
+    },
 };
 
 use core::fmt::Write;
@@ -50,6 +60,18 @@ fn main() -> ! {
 
     //Write a line to serial output
     writeln!(&mut tx, "Starting \r").unwrap();
+
+    //Set up pin for voltage measurement
+    let voltage = gpioa.pa7.into_analog();
+
+    //Set up ADC
+    let mut adc = Adc::adc1(dp.ADC1, true, AdcConfig::default());
+
+    //Take a sample of the voltage measurement
+    let sample = &adc.convert(&voltage, SampleTime::Cycles_480);
+
+    //Write the sample value to serial output
+    writeln!(tx, "{} \r", sample).unwrap();
 
     loop {
         // On for 0.2s, off for 1s.
