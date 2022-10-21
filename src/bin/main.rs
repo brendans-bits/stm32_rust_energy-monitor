@@ -75,5 +75,28 @@ fn main() -> ! {
         led.set_low();
         delay.delay_ms(200_u32);
         writeln!(&mut tx, "Blink \r").unwrap();
+        
+        //Pseudocode derived from emonlib
+        // 1. Wait for the voltage sine wave to be roughly mid-cycle
+        // We will measure voltage because this will always give a measureable sine wave even if there is little current flowing.
+            // a. Start a timer
+            // b. Start a free running loop
+                // Break out of the loop if the voltage pin is between 0.45 and 0.55 of the ADC measurement range
+                // Note: ATM32F4 has a 12-bit ADC (i.e. values between 0 and 4095), so break if the voltage is between 1842 and 2252
+                // Break out of the loop if the timer is greater than the timeout
+        // 2. Main measurement loop
+            // a. Start a timer
+            // b. Start a loop that runs until the voltage waveform that we are measuring has crossed zero a set number of times OR a timeout has been reached
+                // Read raw ADC values for voltage and current
+                // Remove the DC offset
+                // Square and sum values for voltage and current
+                // Apply phase calibration to voltage (to allow for phase delay in voltage transformer)
+                // Calculate instantaneous power
+                // update a counter if the voltage sine wave has crossed zero
+        // 3. Post loop
+            // a. Calculate voltage and current ratio values from calibration constants
+            // b. Calculate RMS values for voltage and current
+            // c. Calculate real power, apparent power, power factor
+            // d. Reset voltage, current, and power accumulators        
     }
 }
