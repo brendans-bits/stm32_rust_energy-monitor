@@ -26,6 +26,15 @@ use libm::*;
 fn main() -> ! {
     defmt::println!("Hello, world!");
 
+    //---------------------------------------
+    // Calibration Constants
+    //---------------------------------------
+    let mut voltage_phase_calibration_value: f64 = 1.0;
+    let mut voltage_calibration_value: f64 = 1.0;
+    let mut voltage_correction_ratio: f64 = 1.0;
+    let mut current_calibration_value: f64 = 1.0;
+    let mut current_correction_ratio: f64 = 1.0;
+
     //
     // Variable definitions
     //
@@ -48,6 +57,8 @@ fn main() -> ! {
     let mut voltage_sample_squared: i128;
     let mut voltage_sample_sum: i128;
     let mut voltage_rms: f64;
+    let mut voltage_phase_corrected: f64;
+    let mut voltage_prior_sample_offset_removed: i128;
 
     let mut current_sample_measurement: u16;
     let mut current_adc_offset: i128;
@@ -55,6 +66,7 @@ fn main() -> ! {
     let mut current_sample_squared: i128;
     let mut current_sample_sum: i128;
     let mut current_rms: f64;
+
 
     let mut power_sample_instantaneous: i128;
     let mut power_sample_sum: i128;
@@ -171,6 +183,7 @@ fn main() -> ! {
         current_sample_sum = 0;
         power_sample_sum = 0;
         samples_count = 0;
+        voltage_prior_sample_offset_removed = 0;
         // 2b. Start a loop that runs until the voltage waveform that we are measuring has crossed zero a set number of times OR a timeout has been reached
         while (timeout_timer.now().duration_since_epoch()
             < timeout_duration - fugit::ExtU32::millis(1))
@@ -193,36 +206,43 @@ fn main() -> ! {
             voltage_sample_sum = voltage_sample_sum + voltage_sample_squared;
             current_sample_sum = current_sample_sum + current_sample_squared;
             // Apply phase calibration to voltage (to allow for phase delay in voltage transformer)
-            // TO DO
+            voltage_phase_corrected = voltage_prior_sample_offset_removed as f64
+                + voltage_phase_calibration_value
+                    * (voltage_sample_offset_removed - voltage_prior_sample_offset_removed) as f64;
             // Calculate instantaneous power
             // NEED TO CHANGE THIS FROM voltage_sample_offset_removed to phase corrected voltage sample
-            power_sample_instantaneous =
-                voltage_sample_offset_removed * current_sample_offset_removed;
+            power_sample_instantaneous = voltage_phase_corrected as i128 * current_sample_offset_removed;
             // Sum of instantaneous power
             power_sample_sum = power_sample_sum + power_sample_instantaneous;
             // Count the number of samples we have taken
             samples_count = samples_count + 1;
+            // Store previous offset-corrected voltage for use in the next iteration of the loop
+            voltage_prior_sample_offset_removed = voltage_sample_offset_removed;
             // update a counter if the voltage sine wave has crossed zero
-            // TO DO 
+            // TO DO
         }
 
         // 3. Post loop
         // 3a. Calculate voltage and current ratio values from calibration constants
         // NEED TO INCLUDE VOLTAGE AND CURRENT CALIBRATION CONSTANTS
+        // voltage_correction_ratio = voltage_calibration_value * ((VCC / 1000) / 1<<12);
+        // current_correction_ratio = current_calibration_value * ((VCC / 1000) / 1<<12);
         // 3b. Calculate RMS values for voltage and current
         // NEED TO MULTIPLE THESE BY THE VOLTAGE AND CURRENT RATIO VALUES
         voltage_rms = sqrt(voltage_sample_sum as f64 / samples_count as f64);
+        //voltage_rms = voltage_correction_ratio * sqrt(voltage_sample_sum as f64 / samples_count as f64);
         current_rms = sqrt(current_sample_sum as f64 / samples_count as f64);
+        //current_rms = current_correction_ratio * sqrt(current_sample_sum as f64 / samples_count as f64);
         defmt::println!("RMS Voltage {} \r", voltage_rms);
         defmt::println!("RMS Current {} \r", current_rms);
         // 3c. Calculate real power, apparent power, power factor
         //NEED TO MULTIPLY THIS BY VOLTAGE AND CURRENT CALIBRATION VALUES
         power_real = power_sample_sum as f64 / samples_count as f64;
+        // power_real = voltage_correction_ratio * current_correction_ratio * power_sample_sum as f64 / samples_count as f64;
         power_apparent = voltage_rms as f64 * current_rms as f64;
         power_factor = power_real / power_apparent;
         defmt::println!("real power {} \r", power_real);
         defmt::println!("apparent power {} \r", power_apparent);
         defmt::println!("power factor {} \r", power_factor);
-
     }
 }
