@@ -112,6 +112,7 @@ fn main() -> ! {
             // Break out of the loop if the voltage pin is between 0.45 and 0.55 of the ADC measurement range
             // Note: ATM32F4 has a 12-bit ADC (i.e. values between 0 and 4095), so break if the voltage is between 1842 and 2252
             if 4095.0 * 0.55 > *sample_voltage as f64 && 4095.0 * 0.45 < *sample_voltage as f64 {
+                timeout_timer.cancel().unwrap();
                 defmt::println!("Reached midpoint...");
                 break;
             }
