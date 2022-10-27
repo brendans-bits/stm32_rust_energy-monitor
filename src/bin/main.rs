@@ -29,11 +29,11 @@ fn main() -> ! {
     //---------------------------------------
     // Calibration Constants
     //---------------------------------------
-    let mut voltage_phase_calibration_value: f64 = 1.0;
-    let mut voltage_calibration_value: f64 = 1.0;
-    let mut voltage_correction_ratio: f64 = 1.0;
-    let mut current_calibration_value: f64 = 1.0;
-    let mut current_correction_ratio: f64 = 1.0;
+    let mut voltage_phase_calibration_value: f64 = -0.20; // Depends on which transformer I am using
+    let mut voltage_calibration_value: f64 = 257.0; // rough value only!
+    let mut voltage_correction_ratio: f64;
+    let mut current_calibration_value: f64 = 19.0; // rough value only!
+    let mut current_correction_ratio: f64;
 
     //
     // Variable definitions
@@ -68,8 +68,8 @@ fn main() -> ! {
     let mut current_rms: f64;
 
 
-    let mut power_sample_instantaneous: i128;
-    let mut power_sample_sum: i128;
+    let mut power_sample_instantaneous: f64;
+    let mut power_sample_sum: f64;
 
     let mut power_real: f64;
     let mut power_apparent: f64;
@@ -109,10 +109,14 @@ fn main() -> ! {
     //.unwrap();
 
     // Create a timer that we use to measuer whether our measurements have exceeded allowable time
-    let mut timeout_timer = dp.TIM5.counter_us(&clocks);
+    let timer = dp.TIM5;
+    let mut timeout_timer = timer.counter_us(&clocks);
+    
 
     // Write a line to serial output
-    //writeln!(&mut tx, "Starting \r").unwrap();
+    // writeln!(&mut tx, "Starting \r").unwrap();
+    
+    //writeln!(&mut tx, "counter, current_sample_offset_removed, voltage_sample_offset_removed, voltage_phase_corrected \r").unwrap();
 
     // Set up pin for voltage and current measurements
     let pin_voltage = gpioa.pa7.into_analog();
@@ -177,17 +181,21 @@ fn main() -> ! {
         timeout_timer.start(timeout_duration).unwrap();
         defmt::println!("Started timer...");
 
-        voltage_adc_offset = 0;
-        current_adc_offset = 0;
+        voltage_adc_offset = 1784;
+        current_adc_offset = 2048;
         voltage_sample_sum = 0;
         current_sample_sum = 0;
-        power_sample_sum = 0;
+        power_sample_sum = 0.0;
         samples_count = 0;
         voltage_prior_sample_offset_removed = 0;
         // 2b. Start a loop that runs until the voltage waveform that we are measuring has crossed zero a set number of times OR a timeout has been reached
         while (timeout_timer.now().duration_since_epoch()
             < timeout_duration - fugit::ExtU32::millis(1))
         {
+            //let counter = timeout_timer.now().duration_since_epoch().ticks();
+            //defmt::println!("timer count {:?}", counter );
+            //let counter = timer.counter_us(&clocks).now().duration_since_epoch().ticks();
+            
             // Read raw ADC values for voltage and current
             voltage_sample_measurement = adc.convert(&pin_voltage, SampleTime::Cycles_3);
             current_sample_measurement = adc.convert(&pin_current, SampleTime::Cycles_3);
@@ -210,8 +218,7 @@ fn main() -> ! {
                 + voltage_phase_calibration_value
                     * (voltage_sample_offset_removed - voltage_prior_sample_offset_removed) as f64;
             // Calculate instantaneous power
-            // NEED TO CHANGE THIS FROM voltage_sample_offset_removed to phase corrected voltage sample
-            power_sample_instantaneous = voltage_phase_corrected as i128 * current_sample_offset_removed;
+            power_sample_instantaneous = voltage_phase_corrected * current_sample_offset_removed as f64;
             // Sum of instantaneous power
             power_sample_sum = power_sample_sum + power_sample_instantaneous;
             // Count the number of samples we have taken
@@ -220,25 +227,34 @@ fn main() -> ! {
             voltage_prior_sample_offset_removed = voltage_sample_offset_removed;
             // update a counter if the voltage sine wave has crossed zero
             // TO DO
+            //writeln!(tx, "{}, {}, {}, {} \r", counter, current_sample_offset_removed, voltage_sample_offset_removed, voltage_phase_corrected).unwrap();
+            delay.delay_ms(1_u32); // I needed to add thsi delay in order for the phase compensation calculations to be correct
+            // Too many samples meant that the phase compensation was incorrect, giving me low real power values
+            // Alternatively, I may need a 'better' voltage transformer...
         }
-
+        defmt::println!("voltage_sample_sum {} \r", voltage_sample_sum);
+        defmt::println!("current_sample_sum {} \r", current_sample_sum);
+        defmt::println!("power_sample_sum {} \r", power_sample_sum);
+        defmt::println!("samples_count {} \r", samples_count); 
         // 3. Post loop
         // 3a. Calculate voltage and current ratio values from calibration constants
-        // NEED TO INCLUDE VOLTAGE AND CURRENT CALIBRATION CONSTANTS
-        // voltage_correction_ratio = voltage_calibration_value * ((VCC / 1000) / 1<<12);
-        // current_correction_ratio = current_calibration_value * ((VCC / 1000) / 1<<12);
+        // Assumes that the device is operated from 3.3v
+        voltage_correction_ratio = voltage_calibration_value * ((3300.0 / 1000.0) / 4096.0);
+        current_correction_ratio = current_calibration_value * ((3300.0 / 1000.0) / 4096.0);
+        defmt::println!("voltage_correction_ratio {} \r", voltage_correction_ratio);
+        defmt::println!("current_correction_ratio {} \r", current_correction_ratio);        
         // 3b. Calculate RMS values for voltage and current
         // NEED TO MULTIPLE THESE BY THE VOLTAGE AND CURRENT RATIO VALUES
-        voltage_rms = sqrt(voltage_sample_sum as f64 / samples_count as f64);
-        //voltage_rms = voltage_correction_ratio * sqrt(voltage_sample_sum as f64 / samples_count as f64);
-        current_rms = sqrt(current_sample_sum as f64 / samples_count as f64);
-        //current_rms = current_correction_ratio * sqrt(current_sample_sum as f64 / samples_count as f64);
+        //voltage_rms = sqrt(voltage_sample_sum as f64 / samples_count as f64);
+        voltage_rms = voltage_correction_ratio * sqrt(voltage_sample_sum as f64 / samples_count as f64);
+        //current_rms = sqrt(current_sample_sum as f64 / samples_count as f64);
+        current_rms = current_correction_ratio * sqrt(current_sample_sum as f64 / samples_count as f64);
         defmt::println!("RMS Voltage {} \r", voltage_rms);
         defmt::println!("RMS Current {} \r", current_rms);
         // 3c. Calculate real power, apparent power, power factor
         //NEED TO MULTIPLY THIS BY VOLTAGE AND CURRENT CALIBRATION VALUES
-        power_real = power_sample_sum as f64 / samples_count as f64;
-        // power_real = voltage_correction_ratio * current_correction_ratio * power_sample_sum as f64 / samples_count as f64;
+        //power_real = power_sample_sum as f64 / samples_count as f64;
+        power_real = voltage_correction_ratio * current_correction_ratio * power_sample_sum as f64 / samples_count as f64;
         power_apparent = voltage_rms as f64 * current_rms as f64;
         power_factor = power_real / power_apparent;
         defmt::println!("real power {} \r", power_real);
