@@ -35,8 +35,9 @@ fn main() -> ! {
     // NOTE: If you want to use the phase correction, you will need to change some of the variable types
     // i.e. change some variables from i128 to f64
     //let voltage_phase_calibration_value: f64 = 0.00; // Depends on which transformer I am using
-    let voltage_calibration_value: f64 = 264.4; // rough value only!
-    let current_calibration_value: f64 = 18.45; // rough value only!
+    let voltage_calibration_value: f64 = 254.4; // rough value only!
+    let current_1_calibration_value: f64 = 18.45; // rough value only!
+    let current_2_calibration_value: f64 = 55.35; // rough value only!
 
     //----------------------------------------
     // Variable definitions
@@ -65,19 +66,33 @@ fn main() -> ! {
     //let mut voltage_prior_sample_offset_removed: i128;
     let mut voltage_correction_ratio: f64;
 
-    let mut current_sample_measurement: u16;
-    let mut current_adc_offset: i128;
-    let mut current_sample_offset_removed: i128;
-    let mut current_sample_squared: i128;
-    let mut current_sample_sum: i128;
-    let mut current_rms: f64;
-    let mut current_correction_ratio: f64;
+    let mut current_1_sample_measurement: u16;
+    let mut current_1_adc_offset: i128;
+    let mut current_1_sample_offset_removed: i128;
+    let mut current_1_sample_squared: i128;
+    let mut current_1_sample_sum: i128;
+    let mut current_1_rms: f64;
+    let mut current_1_correction_ratio: f64;
 
-    let mut power_sample_instantaneous: i128;
-    let mut power_sample_sum: i128;
-    let mut power_real: f64;
-    let mut power_apparent: f64;
-    let mut power_factor: f64;
+    let mut power_1_sample_instantaneous: i128;
+    let mut power_1_sample_sum: i128;
+    let mut power_1_real: f64;
+    let mut power_1_apparent: f64;
+    let mut power_1_factor: f64;
+
+    let mut current_2_sample_measurement: u16;
+    let mut current_2_adc_offset: i128;
+    let mut current_2_sample_offset_removed: i128;
+    let mut current_2_sample_squared: i128;
+    let mut current_2_sample_sum: i128;
+    let mut current_2_rms: f64;
+    let mut current_2_correction_ratio: f64;
+
+    let mut power_2_sample_instantaneous: i128;
+    let mut power_2_sample_sum: i128;
+    let mut power_2_real: f64;
+    let mut power_2_apparent: f64;
+    let mut power_2_factor: f64;
 
     //----------------------------------
     // Set up peripherals
@@ -124,7 +139,8 @@ fn main() -> ! {
 
     // Set up pin for voltage and current measurements
     let pin_voltage = gpioa.pa7.into_analog();
-    let pin_current = gpioa.pa1.into_analog();
+    let pin_current_1 = gpioa.pa1.into_analog();
+    let pin_current_2 = gpioa.pa4.into_analog();
 
     // Set up ADC
     let mut adc = Adc::adc1(dp.ADC1, true, AdcConfig::default());
@@ -189,10 +205,13 @@ fn main() -> ! {
 
         // 2a. Reset some variables used in the loop
         voltage_adc_offset = 2048; // This assumes that you are adding a DC offset that is VCC/2 and a 12 bit ADC
-        current_adc_offset = 2048;
+        current_1_adc_offset = 2048;
+        current_2_adc_offset = 2176; // My voltages are not quite accurate yet
         voltage_sample_sum = 0;
-        current_sample_sum = 0;
-        power_sample_sum = 0;
+        current_1_sample_sum = 0;
+        current_2_sample_sum = 0;
+        power_1_sample_sum = 0;
+        power_2_sample_sum = 0;
         samples_count = 0;
         //voltage_prior_sample_offset_removed = 0;
 
@@ -210,26 +229,36 @@ fn main() -> ! {
 
             // Read raw ADC values for voltage and current
             voltage_sample_measurement = adc.convert(&pin_voltage, SampleTime::Cycles_3);
-            current_sample_measurement = adc.convert(&pin_current, SampleTime::Cycles_3);
+            current_1_sample_measurement = adc.convert(&pin_current_1, SampleTime::Cycles_3);
+            current_2_sample_measurement = adc.convert(&pin_current_2, SampleTime::Cycles_3);
 
             // Adjust DC offset
             // Unlike emonlib, we are pre-seeding a value here
             voltage_adc_offset = voltage_adc_offset
                 + ((voltage_sample_measurement as i128 - voltage_adc_offset) / 1024);
-            current_adc_offset = current_adc_offset
-                + ((current_sample_measurement as i128 - current_adc_offset) / 1024);
+            current_1_adc_offset = current_1_adc_offset
+                + ((current_1_sample_measurement as i128 - current_1_adc_offset) / 1024);
+            current_2_adc_offset = current_2_adc_offset
+                + ((current_2_sample_measurement as i128 - current_2_adc_offset) / 1024);
 
             // Remove DC offset from voltage and current values
             voltage_sample_offset_removed = voltage_sample_measurement as i128 - voltage_adc_offset;
-            current_sample_offset_removed = current_sample_measurement as i128 - current_adc_offset;
+            current_1_sample_offset_removed =
+                current_1_sample_measurement as i128 - current_1_adc_offset;
+            current_2_sample_offset_removed =
+                current_2_sample_measurement as i128 - current_2_adc_offset;
 
             // Square values for voltage and current
             voltage_sample_squared = voltage_sample_offset_removed * voltage_sample_offset_removed;
-            current_sample_squared = current_sample_offset_removed * current_sample_offset_removed;
+            current_1_sample_squared =
+                current_1_sample_offset_removed * current_1_sample_offset_removed;
+            current_2_sample_squared =
+                current_2_sample_offset_removed * current_2_sample_offset_removed;
 
             // Sum values for voltage and current
             voltage_sample_sum = voltage_sample_sum + voltage_sample_squared;
-            current_sample_sum = current_sample_sum + current_sample_squared;
+            current_1_sample_sum = current_1_sample_sum + current_1_sample_squared;
+            current_2_sample_sum = current_2_sample_sum + current_2_sample_squared;
 
             // Apply phase calibration to voltage (to allow for phase delay in voltage transformer)
             //voltage_phase_corrected = voltage_prior_sample_offset_removed as f64
@@ -240,12 +269,15 @@ fn main() -> ! {
 
             // Calculate instantaneous power
             //power_sample_instantaneous = voltage_phase_corrected * current_sample_offset_removed as f64;
-            power_sample_instantaneous =
-                voltage_sample_offset_removed * current_sample_offset_removed;
+            power_1_sample_instantaneous =
+                voltage_sample_offset_removed * current_1_sample_offset_removed;
+            power_2_sample_instantaneous =
+                voltage_sample_offset_removed * current_2_sample_offset_removed;
             //The toroid transformer has negligible phase delay.....
 
             // Sum of instantaneous power
-            power_sample_sum = power_sample_sum + power_sample_instantaneous;
+            power_1_sample_sum = power_1_sample_sum + power_1_sample_instantaneous;
+            power_2_sample_sum = power_2_sample_sum + power_2_sample_instantaneous;
 
             // Count the number of samples we have taken
             samples_count = samples_count + 1;
@@ -258,14 +290,17 @@ fn main() -> ! {
 
             //writeln!(tx, "{}, {}, {}, {} \r", counter, current_sample_offset_removed, voltage_sample_offset_removed, voltage_phase_corrected).unwrap();
             //writeln!(tx, "{}, {}, {} \r", counter, current_sample_offset_removed, voltage_sample_offset_removed).unwrap();
+            //writeln!(tx, "{}, {}, {}, {} \r", counter, voltage_sample_offset_removed, current_1_sample_offset_removed, current_2_sample_offset_removed).unwrap();
 
             //delay.delay_ms(1_u32); // I needed to add thsi delay in order for the phase compensation calculations to be correct
-            // Too many samples meant that the phase compensation was incorrect, giving me low real power values
-            // Alternatively, I may need a 'better' voltage transformer...
+                                   // Too many samples meant that the phase compensation was incorrect, giving me low real power values
+                                   // Alternatively, I may need a 'better' voltage transformer...
         }
         //defmt::println!("voltage_sample_sum {} \r", voltage_sample_sum);
-        //defmt::println!("current_sample_sum {} \r", current_sample_sum);
-        //defmt::println!("power_sample_sum {} \r", power_sample_sum);
+        defmt::println!("current_1_sample_sum {} \r", current_1_sample_sum);
+        defmt::println!("current_2_sample_sum {} \r", current_2_sample_sum);
+        defmt::println!("power_1_sample_sum {} \r", power_1_sample_sum);
+        defmt::println!("power_2_sample_sum {} \r", power_2_sample_sum);
         defmt::println!("samples_count {} \r", samples_count);
 
         //-----------------------
@@ -275,7 +310,8 @@ fn main() -> ! {
         // 3a. Calculate voltage and current ratio values from calibration constants
         // Assumes that the device is operated from 3.3v
         voltage_correction_ratio = voltage_calibration_value * ((3300.0 / 1000.0) / 4096.0);
-        current_correction_ratio = current_calibration_value * ((3300.0 / 1000.0) / 4096.0);
+        current_1_correction_ratio = current_1_calibration_value * ((3300.0 / 1000.0) / 4096.0);
+        current_2_correction_ratio = current_2_calibration_value * ((3300.0 / 1000.0) / 4096.0);
         //defmt::println!("voltage_correction_ratio {} \r", voltage_correction_ratio);
         //defmt::println!("current_correction_ratio {} \r", current_correction_ratio);
 
@@ -284,20 +320,33 @@ fn main() -> ! {
         voltage_rms =
             voltage_correction_ratio * sqrt(voltage_sample_sum as f64 / samples_count as f64);
         //current_rms = sqrt(current_sample_sum as f64 / samples_count as f64);
-        current_rms =
-            current_correction_ratio * sqrt(current_sample_sum as f64 / samples_count as f64);
+        current_1_rms =
+            current_1_correction_ratio * sqrt(current_1_sample_sum as f64 / samples_count as f64);
+        current_2_rms =
+            current_2_correction_ratio * sqrt(current_2_sample_sum as f64 / samples_count as f64);
         defmt::println!("RMS Voltage {} \r", voltage_rms);
-        defmt::println!("RMS Current {} \r", current_rms);
+        defmt::println!("RMS Current 1 {} \r", current_1_rms);
+        defmt::println!("RMS Current 2 {} \r", current_1_rms);
 
         // 3c. Calculate real power, apparent power, power factor
         //power_real = power_sample_sum as f64 / samples_count as f64;
-        power_real = voltage_correction_ratio
-            * current_correction_ratio
-            * (power_sample_sum / samples_count) as f64;
-        power_apparent = voltage_rms * current_rms;
-        power_factor = power_real / power_apparent;
-        defmt::println!("real power {} \r", power_real);
-        defmt::println!("apparent power {} \r", power_apparent);
-        defmt::println!("power factor {} \r", power_factor);
+        power_1_real = voltage_correction_ratio
+            * current_1_correction_ratio
+            * (power_1_sample_sum / samples_count) as f64;
+        power_1_apparent = voltage_rms * current_1_rms;
+        power_1_factor = power_1_real / power_1_apparent;
+        
+        power_2_real = voltage_correction_ratio
+            * current_2_correction_ratio
+            * (power_2_sample_sum / samples_count) as f64;
+        power_2_apparent = voltage_rms * current_2_rms;
+        power_2_factor = power_2_real / power_2_apparent;
+        
+        defmt::println!("real power 1 {} \r", power_1_real);
+        defmt::println!("real power 2 {} \r", power_2_real);
+        defmt::println!("apparent power 1 {} \r", power_1_apparent);
+        defmt::println!("apparent power 2 {} \r", power_2_apparent);
+        defmt::println!("power factor 1 {} \r", power_1_factor);
+        defmt::println!("power factor 2 {} \r", power_2_factor);
     }
 }
