@@ -163,79 +163,91 @@ mod app {
 
     // Task TIM2 is purely to deal with the TIM2 interrupt and call the main measurement loop.
     #[task(
-        binds = TIM2, 
+        binds = TIM2,
         local = [
-            timer_start_measurement_loop, 
+            timer_start_measurement_loop,
             count_measurement
-        ], 
+        ],
         shared = [
-            timer_sampling_loop, 
-            count_sample, 
-            sum_voltage, 
-            counter_count, 
-            sum_current_1, 
+            timer_sampling_loop,
+            count_sample,
+            sum_voltage,
+            counter_count,
+            sum_current_1,
             sum_current_2
         ]
     )]
-    fn start_measurement_loop(mut ctx: start_measurement_loop::Context) {
+    fn start_measurement_loop(ctx: start_measurement_loop::Context) {
         // Clear the interrupt so that the main measurement loop runs again
         ctx.local
             .timer_start_measurement_loop
             .clear_interrupt(Event::Update);
 
+        let start_measurement_loop::LocalResources {
+            count_measurement,
+            timer_start_measurement_loop,
+        } = ctx.local;
+
+        let start_measurement_loop::SharedResources {
+            mut timer_sampling_loop,
+            mut count_sample,
+            mut sum_voltage,
+            mut counter_count,
+            mut sum_current_1,
+            mut sum_current_2,
+        } = ctx.shared;
+
         //Increment the counter so we can see how many measurements we have taken
-        *ctx.local.count_measurement = *ctx.local.count_measurement + 1 as u16;
+        *count_measurement = *count_measurement + 1 as u16;
 
-        defmt::println!("Measurement number {}", ctx.local.count_measurement);
+        defmt::println!("Measurement number {}", count_measurement);
 
-        ctx.shared.count_sample.lock(|count_sample| {
+        count_sample.lock(|count_sample| {
             *count_sample = 0;
         });
-        ctx.shared.sum_voltage.lock(|sum_voltage| {
+        sum_voltage.lock(|sum_voltage| {
             *sum_voltage = 0;
         });
-        ctx.shared.sum_current_1.lock(|sum_current_1| {
+        sum_current_1.lock(|sum_current_1| {
             *sum_current_1 = 0;
         });
-        ctx.shared.sum_current_2.lock(|sum_current_2| {
+        sum_current_2.lock(|sum_current_2| {
             *sum_current_2 = 0;
         });
 
-        ctx.shared
-            .counter_count
-            .lock(|counter_count| counter_count.start(3000.millis()).unwrap());
+        counter_count.lock(|counter_count| counter_count.start(3000.millis()).unwrap());
 
         //get_adc_offset::spawn();
-        ctx.shared.timer_sampling_loop.lock(|timer_sampling_loop| {
+        timer_sampling_loop.lock(|timer_sampling_loop| {
             timer_sampling_loop.start(1000.micros()).unwrap();
             timer_sampling_loop.listen(Event::Update);
         })
     }
 
     #[task(
-        binds = TIM3, 
+        binds = TIM3,
         local = [
-            adc, 
-            pin_voltage, 
-            pin_current_1, 
-            pin_current_2, 
-            buffer_voltage, 
-            buffer_current_1, 
-            buffer_current_2, 
-            simple_moving_average_voltage, 
-            simple_moving_average_current_1, 
-            simple_moving_average_current_2, 
+            adc,
+            pin_voltage,
+            pin_current_1,
+            pin_current_2,
+            buffer_voltage,
+            buffer_current_1,
+            buffer_current_2,
+            simple_moving_average_voltage,
+            simple_moving_average_current_1,
+            simple_moving_average_current_2,
             serial_tx
-        ], 
+        ],
         shared = [
-            timer_sampling_loop, 
-            count_sample, 
-            sum_voltage, 
-            adc_average_voltage, 
-            counter_count, 
-            sum_current_1, 
-            sum_current_2, 
-            adc_average_current_1, 
+            timer_sampling_loop,
+            count_sample,
+            sum_voltage,
+            adc_average_voltage,
+            counter_count,
+            sum_current_1,
+            sum_current_2,
+            adc_average_current_1,
             adc_average_current_2
         ]
     )]
@@ -245,113 +257,117 @@ mod app {
             timer_sampling_loop.clear_interrupt(Event::Update);
         });
 
+        let get_adc_offset::SharedResources {
+            mut timer_sampling_loop,
+            mut count_sample,
+            mut sum_voltage,
+            mut adc_average_voltage,
+            mut counter_count,
+            mut sum_current_1,
+            mut sum_current_2,
+            mut adc_average_current_1,
+            mut adc_average_current_2,
+        } = ctx.shared;
+
+        let get_adc_offset::LocalResources {
+            adc,
+            pin_voltage,
+            pin_current_1,
+            pin_current_2,
+            buffer_voltage,
+            buffer_current_1,
+            buffer_current_2,
+            simple_moving_average_voltage,
+            simple_moving_average_current_1,
+            simple_moving_average_current_2,
+            serial_tx,
+        } = ctx.local;
+
         // 2. Take the ADC sample
         //let adc_raw_value = ctx
         //    .local
         //    .adc
-        //    .convert(ctx.local.pin_voltage, SampleTime::Cycles_3);
-        //ctx.local.buffer_voltage.push(adc_raw_value);
-        ctx.local.buffer_voltage.push(
-            ctx.local
-                .adc
-                .convert(ctx.local.pin_voltage, SampleTime::Cycles_3),
-        );
+        //    .convert(pin_voltage, SampleTime::Cycles_3);
+        //buffer_voltage.push(adc_raw_value);
+        buffer_voltage.push(adc.convert(pin_voltage, SampleTime::Cycles_3));
 
-        ctx.local.buffer_current_1.push(
-            ctx.local
-                .adc
-                .convert(ctx.local.pin_current_1, SampleTime::Cycles_3),
-        );
+        buffer_current_1.push(adc.convert(pin_current_1, SampleTime::Cycles_3));
 
-        ctx.local.buffer_current_2.push(
-            ctx.local
-                .adc
-                .convert(ctx.local.pin_current_2, SampleTime::Cycles_3),
-        );
+        buffer_current_2.push(adc.convert(pin_current_2, SampleTime::Cycles_3));
 
         // 3. if vector > 9 items, drop the first item in the vector
-        if ctx.local.buffer_voltage.len() > 9 {
-            *ctx.local.simple_moving_average_voltage = 
-                ctx.local.buffer_voltage.iter().sum::<u16>()
-                    / ctx.local.buffer_voltage.len() as u16;
+        if buffer_voltage.len() > 9 {
+            *simple_moving_average_voltage =
+                buffer_voltage.iter().sum::<u16>() / buffer_voltage.len() as u16;
 
-            *ctx.local.simple_moving_average_current_1 =
-                ctx.local.buffer_current_1.iter().sum::<u16>()
-                    / ctx.local.buffer_current_1.len() as u16;
+            *simple_moving_average_current_1 =
+                buffer_current_1.iter().sum::<u16>() / buffer_current_1.len() as u16;
 
-            *ctx.local.simple_moving_average_current_2 =
-                ctx.local.buffer_current_2.iter().sum::<u16>()
-                    / ctx.local.buffer_current_2.len() as u16;
+            *simple_moving_average_current_2 =
+                buffer_current_2.iter().sum::<u16>() / buffer_current_2.len() as u16;
 
-            ctx.shared.sum_voltage.lock(|sum_voltage| {
-                *sum_voltage = *sum_voltage + *ctx.local.simple_moving_average_voltage as u128;
+            sum_voltage.lock(|sum_voltage| {
+                *sum_voltage = *sum_voltage + *simple_moving_average_voltage as u128;
             });
 
-            ctx.shared.sum_current_1.lock(|sum_current_1| {
-                *sum_current_1 =
-                    *sum_current_1 + *ctx.local.simple_moving_average_current_1 as u128;
+            sum_current_1.lock(|sum_current_1| {
+                *sum_current_1 = *sum_current_1 + *simple_moving_average_current_1 as u128;
             });
 
-            ctx.shared.sum_current_2.lock(|sum_current_2| {
-                *sum_current_2 =
-                    *sum_current_2 + *ctx.local.simple_moving_average_current_2 as u128;
+            sum_current_2.lock(|sum_current_2| {
+                *sum_current_2 = *sum_current_2 + *simple_moving_average_current_2 as u128;
             });
 
-            ctx.local.buffer_voltage.remove(0);
-            ctx.local.buffer_current_1.remove(0);
-            ctx.local.buffer_current_2.remove(0);
+            buffer_voltage.remove(0);
+            buffer_current_1.remove(0);
+            buffer_current_2.remove(0);
 
-            ctx.shared.count_sample.lock(|count_sample| {
+            count_sample.lock(|count_sample| {
                 *count_sample = *count_sample + 1;
             });
 
-            ctx.shared
-                .counter_count
+            counter_count
                 .lock(|counter_count| {
                     writeln!(
-                        ctx.local.serial_tx,
+                        serial_tx,
                         "{}, {}, {}, {} \r",
                         counter_count.now().duration_since_epoch().ticks(),
-                        ctx.local.simple_moving_average_voltage,
-                        ctx.local.simple_moving_average_current_1,
-                        ctx.local.simple_moving_average_current_2
+                        simple_moving_average_voltage,
+                        simple_moving_average_current_1,
+                        simple_moving_average_current_2
                     )
                 })
                 .unwrap();
         };
 
-        ctx.shared.count_sample.lock(|count_sample| {
+        count_sample.lock(|count_sample| {
             if count_sample > &mut 2000 {
-                ctx.shared.timer_sampling_loop.lock(|timer_sampling_loop| {
+                timer_sampling_loop.lock(|timer_sampling_loop| {
                     timer_sampling_loop.cancel().unwrap();
                 });
 
-                ctx.shared.sum_voltage.lock(|sum_voltage| {
-                    ctx.shared.adc_average_voltage.lock(|adc_average_voltage| {
-                        //let time_taken = ctx.local.counter_count.now().duration_since_epoch().ticks();
+                sum_voltage.lock(|sum_voltage| {
+                    adc_average_voltage.lock(|adc_average_voltage| {
+                        //let time_taken = counter_count.now().duration_since_epoch().ticks();
                         *adc_average_voltage = *sum_voltage / *count_sample as u128;
                         defmt::println!("ADC Voltage average {}", adc_average_voltage);
                     });
                 });
-                ctx.shared.sum_current_1.lock(|sum_current_1| {
-                    ctx.shared
-                        .adc_average_current_1
-                        .lock(|adc_average_current_1| {
-                            //let time_taken = ctx.local.counter_count.now().duration_since_epoch().ticks();
-                            *adc_average_current_1 = *sum_current_1 / *count_sample as u128;
-                            defmt::println!("ADC Current 1 average {}", adc_average_current_1);
-                        });
+                sum_current_1.lock(|sum_current_1| {
+                    adc_average_current_1.lock(|adc_average_current_1| {
+                        //let time_taken = counter_count.now().duration_since_epoch().ticks();
+                        *adc_average_current_1 = *sum_current_1 / *count_sample as u128;
+                        defmt::println!("ADC Current 1 average {}", adc_average_current_1);
+                    });
                 });
-                ctx.shared.sum_current_2.lock(|sum_current_2| {
-                    ctx.shared
-                        .adc_average_current_2
-                        .lock(|adc_average_current_2| {
-                            //let time_taken = ctx.local.counter_count.now().duration_since_epoch().ticks();
-                            *adc_average_current_2 = *sum_current_2 / *count_sample as u128;
-                            defmt::println!("ADC Current 2 average {}", adc_average_current_2);
-                        });
+                sum_current_2.lock(|sum_current_2| {
+                    adc_average_current_2.lock(|adc_average_current_2| {
+                        //let time_taken = counter_count.now().duration_since_epoch().ticks();
+                        *adc_average_current_2 = *sum_current_2 / *count_sample as u128;
+                        defmt::println!("ADC Current 2 average {}", adc_average_current_2);
+                    });
                 });
-                ctx.shared.counter_count.lock(|counter_count| {
+                counter_count.lock(|counter_count| {
                     defmt::println!(
                         "Time taken {}",
                         counter_count.now().duration_since_epoch().ticks()
