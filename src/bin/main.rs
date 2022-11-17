@@ -2,7 +2,6 @@
 #![no_main]
 #![no_std]
 #![allow(unused_imports)]
-#![feature(default_alloc_error_handler)]
 
 use rtic::app;
 use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memory layout
@@ -10,7 +9,6 @@ use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memo
 #[app(device = stm32f4xx_hal::pac, peripherals = true, dispatchers = [SPI1])]
 mod app {
 
-    use alloc_cortex_m::CortexMHeap;
     use core::fmt::Write;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use rtt_target::{rprintln, rtt_init_print};
@@ -25,8 +23,7 @@ mod app {
         serial::{Config, Serial, Tx},
         timer::{CounterUs, Event},
     };
-    extern crate alloc;
-    use alloc::vec::Vec;
+    use heapless::Vec;
 
     pub struct ADCResources {
         timer_sampling_loop: CounterUs<TIM3>,
@@ -40,17 +37,8 @@ mod app {
         adc_average_current_2: u128,
     }
 
-    #[global_allocator]
-    static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
-
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
-        {
-            use core::mem::MaybeUninit;
-            const HEAP_SIZE: usize = 1024;
-            static mut HEAP: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-            unsafe { ALLOCATOR.init(HEAP.as_ptr() as usize, HEAP_SIZE) }
-        }
 
         let device_peripherals = ctx.device;
 
@@ -82,17 +70,17 @@ mod app {
         let simple_moving_average_voltage: u16 = 0;
         //let sum_voltage: u128 = 0;
         //let adc_average_voltage: u128 = 0;
-        let buffer_voltage = Vec::<u16>::new();
+        let buffer_voltage: Vec<u16, 10> = Vec::new();
 
         let simple_moving_average_current_1: u16 = 0;
         //let sum_current_1: u128 = 0;
         //let adc_average_current_1: u128 = 0;
-        let buffer_current_1 = Vec::<u16>::new();
+        let buffer_current_1: Vec<u16, 10> = Vec::new();
 
         let simple_moving_average_current_2: u16 = 0;
         //let sum_current_2: u128 = 0;
         //let adc_average_current_2: u128 = 0;
-        let buffer_current_2 = Vec::<u16>::new();
+        let buffer_current_2: Vec<u16, 10> = Vec::new();
 
         // Set up Serial
         let tx_pin = gpioa.pa9.into_alternate();
@@ -155,11 +143,11 @@ mod app {
         adc: Adc<ADC1>,
         timer_start_measurement_loop: CounterUs<TIM2>,
         count_measurement: u16,
-        buffer_voltage: Vec<u16>,
+        buffer_voltage: Vec<u16, 10>,
         simple_moving_average_voltage: u16,
         serial_tx: Tx<USART1>,
-        buffer_current_1: Vec<u16>,
-        buffer_current_2: Vec<u16>,
+        buffer_current_1: Vec<u16, 10>,
+        buffer_current_2: Vec<u16, 10>,
         simple_moving_average_current_1: u16,
         simple_moving_average_current_2: u16,
     }
@@ -250,11 +238,11 @@ mod app {
                 .timer_sampling_loop
                 .clear_interrupt(Event::Update);
 
-            buffer_voltage.push(adc.convert(pin_voltage, SampleTime::Cycles_3));
+            buffer_voltage.push(adc.convert(pin_voltage, SampleTime::Cycles_3)).unwrap();
 
-            buffer_current_1.push(adc.convert(pin_current_1, SampleTime::Cycles_3));
+            buffer_current_1.push(adc.convert(pin_current_1, SampleTime::Cycles_3)).unwrap();
 
-            buffer_current_2.push(adc.convert(pin_current_2, SampleTime::Cycles_3));
+            buffer_current_2.push(adc.convert(pin_current_2, SampleTime::Cycles_3)).unwrap();
 
             if buffer_voltage.len() > 9 {
                 *simple_moving_average_voltage =
