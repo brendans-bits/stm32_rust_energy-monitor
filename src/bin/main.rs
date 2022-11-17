@@ -28,6 +28,7 @@ mod app {
     pub struct ADCResources {
         timer_sampling_loop: CounterUs<TIM3>,
         counter_count: CounterUs<TIM5>,
+        timer_measurement_loop: CounterUs<TIM4>,
         count_sample: u16,
         sum_voltage: u128,
         adc_average_voltage: u128,
@@ -46,14 +47,15 @@ mod app {
 
         let clocks = rcc.cfgr.use_hse(25.MHz()).sysclk(100.MHz()).freeze();
 
-        let mut timer_start_measurement_loop = device_peripherals.TIM2.counter_us(&clocks);
+        let mut timer_step_1_start_measurement_loop = device_peripherals.TIM2.counter_us(&clocks);
 
-        timer_start_measurement_loop.start(5000.millis()).unwrap();
-        timer_start_measurement_loop.listen(Event::Update);
+        timer_step_1_start_measurement_loop.start(10000.millis()).unwrap();
+        timer_step_1_start_measurement_loop.listen(Event::Update);
 
         unsafe {
             cortex_m::peripheral::NVIC::unmask(interrupt::TIM2);
             cortex_m::peripheral::NVIC::unmask(interrupt::TIM3);
+            cortex_m::peripheral::NVIC::unmask(interrupt::TIM4);
         }
 
         let gpioa = device_peripherals.GPIOA.split();
@@ -64,7 +66,7 @@ mod app {
         // Set up ADC
         let adc = Adc::adc1(device_peripherals.ADC1, true, AdcConfig::default());
 
-        let count_measurement: u16 = 0;
+        //let count_measurement: u16 = 0;
         //let count_sample: u16 = 0;
 
         let simple_moving_average_voltage: u16 = 0;
@@ -99,6 +101,7 @@ mod app {
         let adc_resources = ADCResources {
             timer_sampling_loop: device_peripherals.TIM3.counter_us(&clocks),
             counter_count: device_peripherals.TIM5.counter_us(&clocks),
+            timer_measurement_loop: device_peripherals.TIM4.counter_us(&clocks),
             count_sample: 0,
             sum_voltage: 0,
             adc_average_voltage: 0,
@@ -116,8 +119,8 @@ mod app {
                 pin_current_1,
                 pin_current_2,
                 adc,
-                timer_start_measurement_loop,
-                count_measurement,
+                timer_step_1_start_measurement_loop,
+                //count_measurement,
                 buffer_voltage,
                 simple_moving_average_voltage,
                 serial_tx,
@@ -141,8 +144,8 @@ mod app {
         pin_current_1: Pin<'A', 0, Analog>,
         pin_current_2: Pin<'A', 3, Analog>,
         adc: Adc<ADC1>,
-        timer_start_measurement_loop: CounterUs<TIM2>,
-        count_measurement: u16,
+        timer_step_1_start_measurement_loop: CounterUs<TIM2>,
+        //count_measurement: u16,
         buffer_voltage: Vec<u16, 10>,
         simple_moving_average_voltage: u16,
         serial_tx: Tx<USART1>,
@@ -156,27 +159,24 @@ mod app {
     #[task(
         binds = TIM2,
         local = [
-            timer_start_measurement_loop,
-            count_measurement,
+            timer_step_1_start_measurement_loop,
+            //count_measurement,
             //heap_usage
         ],
         shared = [
             adc_resources
         ]
     )]
-    fn start_measurement_loop(mut ctx: start_measurement_loop::Context) {
-        let start_measurement_loop::LocalResources {
-            count_measurement,
-            timer_start_measurement_loop,
+    fn step_1_start_measurement_loop(mut ctx: step_1_start_measurement_loop::Context) {
+        let step_1_start_measurement_loop::LocalResources {
+            //count_measurement,
+            timer_step_1_start_measurement_loop,
         } = ctx.local;
 
         // Clear the interrupt so that the main measurement loop runs again
-        timer_start_measurement_loop.clear_interrupt(Event::Update);
+        timer_step_1_start_measurement_loop.clear_interrupt(Event::Update);
 
-        //Increment the counter so we can see how many measurements we have taken
-        *count_measurement = *count_measurement + 1 as u16;
-
-        defmt::println!("Measurement number {}", count_measurement);
+        defmt::println!("Start measurement loop");
 
         ctx.shared.adc_resources.lock(|adc_resources| {
             adc_resources.count_sample = 0;
@@ -216,8 +216,8 @@ mod app {
              adc_resources
          ]
      )]
-    fn get_adc_offset(ctx: get_adc_offset::Context) {
-        let get_adc_offset::LocalResources {
+    fn step_2_get_adc_offset(ctx: step_2_get_adc_offset::Context) {
+        let step_2_get_adc_offset::LocalResources {
             adc,
             pin_voltage,
             pin_current_1,
@@ -231,7 +231,7 @@ mod app {
             serial_tx,
         } = ctx.local;
 
-        let get_adc_offset::SharedResources { mut adc_resources } = ctx.shared;
+        let step_2_get_adc_offset::SharedResources { mut adc_resources } = ctx.shared;
 
         adc_resources.lock(|adc_resources| {
             adc_resources
@@ -313,7 +313,47 @@ mod app {
                         .duration_since_epoch()
                         .ticks()
                 );
+
+                adc_resources
+                .timer_measurement_loop
+                .start(1000.micros())
+                .unwrap();
+            
+                adc_resources.timer_measurement_loop.listen(Event::Update);
+
+                adc_resources.count_sample = 0;
+                
             };
         })
+    }
+
+    #[task(binds = TIM4, shared = [adc_resources])]
+    fn step_3_measure_energy_usage(ctx: step_3_measure_energy_usage::Context) {
+
+        let step_3_measure_energy_usage::SharedResources { mut adc_resources } = ctx.shared;
+
+        adc_resources.lock(|adc_resources| {
+
+            adc_resources.timer_measurement_loop.clear_interrupt(Event::Update);
+
+            adc_resources.count_sample = adc_resources.count_sample + 1;
+
+            if adc_resources.count_sample > 2000 {
+                
+                adc_resources.timer_measurement_loop.cancel().unwrap();
+
+                defmt::println!("Finished");
+
+                step_4_post_measurement_calculations::spawn().unwrap();
+            
+            }
+        
+        });
+
+    }
+
+    #[task]
+    fn step_4_post_measurement_calculations(ctx: step_4_post_measurement_calculations::Context) {
+        defmt::println!("Energy usage is....");
     }
 }
