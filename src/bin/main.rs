@@ -26,10 +26,11 @@ mod app {
     use heapless::Vec;
 
     pub struct ADCResources {
-        timer_sampling_loop: CounterUs<TIM3>,
+        step_2_timer_adc_sampling_loop: CounterUs<TIM3>,
         counter_count: CounterUs<TIM5>,
-        timer_measurement_loop: CounterUs<TIM4>,
-        count_sample: u16,
+        step_3_timer_energy_sampling_loop: CounterUs<TIM4>,
+        adc_offset_measurement_count_sample: u16,
+        energy_usage_measurement_count_sample: u16,
         sum_voltage: u128,
         adc_average_voltage: u128,
         sum_current_1: u128,
@@ -99,10 +100,11 @@ mod app {
         .unwrap();
 
         let adc_resources = ADCResources {
-            timer_sampling_loop: device_peripherals.TIM3.counter_us(&clocks),
+            step_2_timer_adc_sampling_loop: device_peripherals.TIM3.counter_us(&clocks),
             counter_count: device_peripherals.TIM5.counter_us(&clocks),
-            timer_measurement_loop: device_peripherals.TIM4.counter_us(&clocks),
-            count_sample: 0,
+            step_3_timer_energy_sampling_loop: device_peripherals.TIM4.counter_us(&clocks),
+            adc_offset_measurement_count_sample: 0,
+            energy_usage_measurement_count_sample: 0,
             sum_voltage: 0,
             adc_average_voltage: 0,
             sum_current_1: 0,
@@ -179,7 +181,7 @@ mod app {
         defmt::println!("Start measurement loop");
 
         ctx.shared.adc_resources.lock(|adc_resources| {
-            adc_resources.count_sample = 0;
+            adc_resources.adc_offset_measurement_count_sample = 0;
 
             adc_resources.sum_voltage = 0;
 
@@ -190,10 +192,10 @@ mod app {
             adc_resources.counter_count.start(3000.millis()).unwrap();
 
             adc_resources
-                .timer_sampling_loop
+                .step_2_timer_adc_sampling_loop
                 .start(1000.micros())
                 .unwrap();
-            adc_resources.timer_sampling_loop.listen(Event::Update);
+            adc_resources.step_2_timer_adc_sampling_loop.listen(Event::Update);
         });
     }
 
@@ -235,7 +237,7 @@ mod app {
 
         adc_resources.lock(|adc_resources| {
             adc_resources
-                .timer_sampling_loop
+                .step_2_timer_adc_sampling_loop
                 .clear_interrupt(Event::Update);
 
             buffer_voltage.push(adc.convert(pin_voltage, SampleTime::Cycles_3)).unwrap();
@@ -267,7 +269,7 @@ mod app {
                 buffer_current_1.remove(0);
                 buffer_current_2.remove(0);
 
-                adc_resources.count_sample = adc_resources.count_sample + 1;
+                adc_resources.adc_offset_measurement_count_sample = adc_resources.adc_offset_measurement_count_sample + 1;
 
                 writeln!(
                     serial_tx,
@@ -284,22 +286,22 @@ mod app {
                 .unwrap();
             }
 
-            if adc_resources.count_sample > 2000 {
-                adc_resources.timer_sampling_loop.cancel().unwrap();
+            if adc_resources.adc_offset_measurement_count_sample > 2000 {
+                adc_resources.step_2_timer_adc_sampling_loop.cancel().unwrap();
 
                 adc_resources.adc_average_voltage =
-                    adc_resources.sum_voltage / adc_resources.count_sample as u128;
+                    adc_resources.sum_voltage / adc_resources.adc_offset_measurement_count_sample as u128;
                 defmt::println!("ADC Voltage average {}", adc_resources.adc_average_voltage);
 
                 adc_resources.adc_average_current_1 =
-                    adc_resources.sum_current_1 / adc_resources.count_sample as u128;
+                    adc_resources.sum_current_1 / adc_resources.adc_offset_measurement_count_sample as u128;
                 defmt::println!(
                     "ADC Current 1 average {}",
                     adc_resources.adc_average_current_1
                 );
 
                 adc_resources.adc_average_current_2 =
-                    adc_resources.sum_current_2 / adc_resources.count_sample as u128;
+                    adc_resources.sum_current_2 / adc_resources.adc_offset_measurement_count_sample as u128;
                 defmt::println!(
                     "ADC Current 2 average {}",
                     adc_resources.adc_average_current_2
@@ -315,13 +317,13 @@ mod app {
                 );
 
                 adc_resources
-                .timer_measurement_loop
+                .step_3_timer_energy_sampling_loop
                 .start(1000.micros())
                 .unwrap();
             
-                adc_resources.timer_measurement_loop.listen(Event::Update);
+                adc_resources.step_3_timer_energy_sampling_loop.listen(Event::Update);
 
-                adc_resources.count_sample = 0;
+                adc_resources.energy_usage_measurement_count_sample = 0;
                 
             };
         })
@@ -334,13 +336,13 @@ mod app {
 
         adc_resources.lock(|adc_resources| {
 
-            adc_resources.timer_measurement_loop.clear_interrupt(Event::Update);
+            adc_resources.step_3_timer_energy_sampling_loop.clear_interrupt(Event::Update);
 
-            adc_resources.count_sample = adc_resources.count_sample + 1;
+            adc_resources.energy_usage_measurement_count_sample = adc_resources.energy_usage_measurement_count_sample + 1;
 
-            if adc_resources.count_sample > 2000 {
+            if adc_resources.energy_usage_measurement_count_sample > 2000 {
                 
-                adc_resources.timer_measurement_loop.cancel().unwrap();
+                adc_resources.step_3_timer_energy_sampling_loop.cancel().unwrap();
 
                 defmt::println!("Finished");
 
