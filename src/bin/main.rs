@@ -37,6 +37,9 @@ mod app {
         sum_current_2: u128,
         adc_average_current_1: u128,
         adc_average_current_2: u128,
+        pin_voltage: Pin<'A', 7, Analog>,
+        pin_current_1: Pin<'A', 0, Analog>,
+        pin_current_2: Pin<'A', 3, Analog>,
     }
 
     #[init]
@@ -60,9 +63,9 @@ mod app {
         }
 
         let gpioa = device_peripherals.GPIOA.split();
-        let pin_voltage = gpioa.pa7.into_analog();
-        let pin_current_1 = gpioa.pa0.into_analog();
-        let pin_current_2 = gpioa.pa3.into_analog();
+        //let pin_voltage = gpioa.pa7.into_analog();
+        //let pin_current_1 = gpioa.pa0.into_analog();
+        //let pin_current_2 = gpioa.pa3.into_analog();
 
         // Set up ADC
         let adc = Adc::adc1(device_peripherals.ADC1, true, AdcConfig::default());
@@ -111,15 +114,18 @@ mod app {
             sum_current_2: 0,
             adc_average_current_1: 0,
             adc_average_current_2: 0,
+            pin_voltage: gpioa.pa7.into_analog(),
+            pin_current_1: gpioa.pa0.into_analog(),
+            pin_current_2: gpioa.pa3.into_analog(),
         };
 
         (
             Shared { adc_resources },
             Local {
                 //led,
-                pin_voltage,
-                pin_current_1,
-                pin_current_2,
+                //pin_voltage,
+                //pin_current_1,
+                //pin_current_2,
                 adc,
                 timer_step_1_start_measurement_loop,
                 //count_measurement,
@@ -142,9 +148,9 @@ mod app {
 
     #[local]
     struct Local {
-        pin_voltage: Pin<'A', 7, Analog>,
-        pin_current_1: Pin<'A', 0, Analog>,
-        pin_current_2: Pin<'A', 3, Analog>,
+        //pin_voltage: Pin<'A', 7, Analog>,
+        //pin_current_1: Pin<'A', 0, Analog>,
+        //pin_current_2: Pin<'A', 3, Analog>,
         adc: Adc<ADC1>,
         timer_step_1_start_measurement_loop: CounterUs<TIM2>,
         //count_measurement: u16,
@@ -203,9 +209,9 @@ mod app {
         binds = TIM3,
         local = [
              adc,
-             pin_voltage,
-             pin_current_1,
-             pin_current_2,
+             //pin_voltage,
+             //pin_current_1,
+             //pin_current_2,
              buffer_voltage,
              buffer_current_1,
              buffer_current_2,
@@ -221,9 +227,9 @@ mod app {
     fn step_2_get_adc_offset(ctx: step_2_get_adc_offset::Context) {
         let step_2_get_adc_offset::LocalResources {
             adc,
-            pin_voltage,
-            pin_current_1,
-            pin_current_2,
+            //pin_voltage,
+            //pin_current_1,
+            //pin_current_2,
             buffer_voltage,
             buffer_current_1,
             buffer_current_2,
@@ -240,11 +246,11 @@ mod app {
                 .step_2_timer_adc_sampling_loop
                 .clear_interrupt(Event::Update);
 
-            buffer_voltage.push(adc.convert(pin_voltage, SampleTime::Cycles_3)).unwrap();
+            buffer_voltage.push(adc.convert(&adc_resources.pin_voltage, SampleTime::Cycles_3)).unwrap();
 
-            buffer_current_1.push(adc.convert(pin_current_1, SampleTime::Cycles_3)).unwrap();
+            buffer_current_1.push(adc.convert(&adc_resources.pin_current_1, SampleTime::Cycles_3)).unwrap();
 
-            buffer_current_2.push(adc.convert(pin_current_2, SampleTime::Cycles_3)).unwrap();
+            buffer_current_2.push(adc.convert(&adc_resources.pin_current_2, SampleTime::Cycles_3)).unwrap();
 
             if buffer_voltage.len() > 9 {
                 *simple_moving_average_voltage =
