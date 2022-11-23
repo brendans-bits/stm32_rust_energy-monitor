@@ -10,11 +10,9 @@ use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memo
 mod app {
 
     use core::fmt::Write;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    use core::u128;
     use heapless::Vec;
     use libm::sqrt;
-    use rtt_target::{rprintln, rtt_init_print};
+    //use rtt_target::{rprintln, rtt_init_print};
     use stm32f4xx_hal::{
         adc::{
             config::{AdcConfig, SampleTime},
@@ -72,6 +70,12 @@ mod app {
         rms_voltage: f64,
         rms_current_1: f64,
         rms_current_2: f64,
+        // Power - Instantaneous
+        instantaneous_power_1: i128,
+        instantaneous_power_2: i128,
+        // Power - Sum
+        sum_power_1: i128,
+        sum_power_2: i128,
     }
 
     #[init]
@@ -96,30 +100,6 @@ mod app {
         }
 
         let gpioa = device_peripherals.GPIOA.split();
-        //let pin_voltage = gpioa.pa7.into_analog();
-        //let pin_current_1 = gpioa.pa0.into_analog();
-        //let pin_current_2 = gpioa.pa3.into_analog();
-
-        // Set up ADC
-        //let adc = Adc::adc1(device_peripherals.ADC1, true, AdcConfig::default());
-
-        //let count_measurement: u16 = 0;
-        //let count_sample: u16 = 0;
-
-        //let simple_moving_average_voltage: u16 = 0;
-        //let sum_voltage: u128 = 0;
-        //let adc_offset_voltage: u128 = 0;
-        //let buffer_voltage: Vec<u16, 10> = Vec::new();
-
-        //let simple_moving_average_current_1: u16 = 0;
-        //let sum_current_1: u128 = 0;
-        //let adc_offset_current_1: u128 = 0;
-        //let buffer_current_1: Vec<u16, 10> = Vec::new();
-
-        //let simple_moving_average_current_2: u16 = 0;
-        //let sum_current_2: u128 = 0;
-        //let adc_offset_current_2: u128 = 0;
-        //let buffer_current_2: Vec<u16, 10> = Vec::new();
 
         // Set up Serial
         let tx_pin = gpioa.pa9.into_alternate();
@@ -135,9 +115,9 @@ mod app {
         )
         .unwrap();
 
-        let voltage_calibration_value: f64 = 407.33; // rough value only!
-        let current_1_calibration_value: f64 = 27.01; // rough value only!
-        let current_2_calibration_value: f64 = 82.42; // rough value only!
+        let voltage_calibration_value: f64 = 394.9; // rough value only!
+        let current_1_calibration_value: f64 = 27.87; // rough value only!
+        let current_2_calibration_value: f64 = 85.04; // rough value only!
 
         let shared_adc_resources = SharedADCResources {
             //ADC
@@ -173,18 +153,23 @@ mod app {
             sum_squared_current_1: 0,
             sum_squared_current_2: 0,
 
-            sum_voltage: 0,
             adc_offset_voltage: 0,
-            sum_current_1: 0,
-            sum_current_2: 0,
             adc_offset_current_1: 0,
             adc_offset_current_2: 0,
+
+            sum_voltage: 0,
+            sum_current_1: 0,
+            sum_current_2: 0,
 
             rms_voltage: 0.0,
             rms_current_1: 0.0,
             rms_current_2: 0.0,
-
-
+            // Power - Instantaneous
+            instantaneous_power_1: 0,
+            instantaneous_power_2: 0,
+            // Power - Sum
+            sum_power_1: 0,
+            sum_power_2: 0,
         };
 
         (
@@ -192,11 +177,8 @@ mod app {
                 shared_adc_resources,
             },
             Local {
-
                 timer_step_1_start_measurement_loop,
-
                 serial_tx,
-
                 voltage_calibration_value,
                 current_1_calibration_value,
                 current_2_calibration_value,
@@ -212,28 +194,15 @@ mod app {
 
     #[local]
     struct Local {
-
         timer_step_1_start_measurement_loop: CounterUs<TIM2>,
-
         serial_tx: Tx<USART1>,
-
         voltage_calibration_value: f64,
         current_1_calibration_value: f64,
         current_2_calibration_value: f64,
     }
 
     // Task TIM2 is purely to deal with the TIM2 interrupt and call the main measurement loop.
-    #[task(
-        binds = TIM2,
-        local = [
-            timer_step_1_start_measurement_loop,
-            //count_measurement,
-            //heap_usage
-        ],
-        shared = [
-            shared_adc_resources
-        ]
-    )]
+    #[task(binds = TIM2, local = [timer_step_1_start_measurement_loop], shared = [shared_adc_resources])]
     fn step_1_start_measurement_loop(mut ctx: step_1_start_measurement_loop::Context) {
         let step_1_start_measurement_loop::LocalResources {
             //count_measurement,
@@ -271,20 +240,9 @@ mod app {
             });
     }
 
-    #[task(
-        binds = TIM3,
-        local = [
-             serial_tx
-         ],
-         shared = [
-             shared_adc_resources
-         ]
-     )]
+    #[task(binds = TIM3, local = [serial_tx], shared = [shared_adc_resources])]
     fn step_2_get_adc_offset(ctx: step_2_get_adc_offset::Context) {
-        let step_2_get_adc_offset::LocalResources {
-
-            serial_tx,
-        } = ctx.local;
+        let step_2_get_adc_offset::LocalResources { serial_tx } = ctx.local;
 
         let step_2_get_adc_offset::SharedResources {
             mut shared_adc_resources,
@@ -374,33 +332,35 @@ mod app {
 
                 shared_adc_resources.adc_offset_voltage = shared_adc_resources.sum_voltage
                     / shared_adc_resources.count_adc_offset_measurements as u128;
-                defmt::println!(
-                    "ADC Voltage average {}",
-                    shared_adc_resources.adc_offset_voltage
-                );
+                //defmt::println!(
+                //    "ADC Voltage average {}",
+                //    shared_adc_resources.adc_offset_voltage
+                //);
 
                 shared_adc_resources.adc_offset_current_1 = shared_adc_resources.sum_current_1
                     / shared_adc_resources.count_adc_offset_measurements as u128;
-                defmt::println!(
-                    "ADC Current 1 average {}",
-                    shared_adc_resources.adc_offset_current_1
-                );
+                //defmt::println!(
+                //    "ADC Current 1 average {}",
+                //    shared_adc_resources.adc_offset_current_1
+                //);
 
                 shared_adc_resources.adc_offset_current_2 = shared_adc_resources.sum_current_2
                     / shared_adc_resources.count_adc_offset_measurements as u128;
-                defmt::println!(
-                    "ADC Current 2 average {}",
-                    shared_adc_resources.adc_offset_current_2
-                );
+                //defmt::println!(
+                //    "ADC Current 2 average {}",
+                //    shared_adc_resources.adc_offset_current_2
+                //);
 
                 defmt::println!(
-                    "Time taken {}",
+                    "Time taken for adc offset measurement {}",
                     shared_adc_resources
                         .count_time
                         .now()
                         .duration_since_epoch()
                         .ticks()
                 );
+
+                shared_adc_resources.count_time.cancel().unwrap();
 
                 shared_adc_resources.count_energy_usage_measurements = 0;
                 shared_adc_resources.buffer_voltage = Vec::new();
@@ -409,6 +369,13 @@ mod app {
                 shared_adc_resources.sum_squared_voltage = 0;
                 shared_adc_resources.sum_squared_current_1 = 0;
                 shared_adc_resources.sum_squared_current_2 = 0;
+                shared_adc_resources.sum_power_1 = 0;
+                shared_adc_resources.sum_power_2 = 0;
+
+                shared_adc_resources
+                    .count_time
+                    .start(3000.millis())
+                    .unwrap();
 
                 shared_adc_resources
                     .step_3_timer_energy_sampling_loop
@@ -418,8 +385,6 @@ mod app {
                 shared_adc_resources
                     .step_3_timer_energy_sampling_loop
                     .listen(Event::Update);
-
-
             };
         })
     }
@@ -465,6 +430,7 @@ mod app {
                 .unwrap();
 
             if shared_adc_resources.buffer_voltage.len() > 9 {
+                
                 // Get simple moving averages for ADC values
 
                 shared_adc_resources.simple_moving_average_voltage =
@@ -520,6 +486,24 @@ mod app {
                     .sum_squared_current_2
                     + shared_adc_resources.squared_offset_removed_current_2;
 
+                // Calculate instantaneous power
+
+                shared_adc_resources.instantaneous_power_1 = shared_adc_resources
+                    .offset_removed_voltage
+                    * shared_adc_resources.offset_removed_current_1;
+
+                shared_adc_resources.instantaneous_power_2 = shared_adc_resources
+                    .offset_removed_voltage
+                    * shared_adc_resources.offset_removed_current_2;
+
+                // Sum instantaneous power
+
+                shared_adc_resources.sum_power_1 =
+                    shared_adc_resources.sum_power_1 + shared_adc_resources.instantaneous_power_1;
+
+                shared_adc_resources.sum_power_2 =
+                    shared_adc_resources.sum_power_2 + shared_adc_resources.instantaneous_power_2;
+
                 shared_adc_resources.buffer_voltage.remove(0);
                 shared_adc_resources.buffer_current_1.remove(0);
                 shared_adc_resources.buffer_current_2.remove(0);
@@ -533,7 +517,18 @@ mod app {
                         .cancel()
                         .unwrap();
 
-                    defmt::println!("Finished");
+                    //defmt::println!("Finished");
+
+                    defmt::println!(
+                        "Time taken for energy usage measurements {}",
+                        shared_adc_resources
+                            .count_time
+                            .now()
+                            .duration_since_epoch()
+                            .ticks()
+                    );
+
+                    shared_adc_resources.count_time.cancel().unwrap();
 
                     step_4_post_measurement_calculations::spawn().unwrap();
                 }
@@ -567,6 +562,8 @@ mod app {
             let current_2_correction_ratio =
                 *current_2_calibration_value * ((3300.0 / 1000.0) / 4096.0);
 
+            // Calculate RMS values
+
             shared_adc_resources.rms_voltage = voltage_correction_ratio
                 * sqrt(
                     shared_adc_resources.sum_squared_voltage as f64
@@ -588,6 +585,43 @@ mod app {
             defmt::println!("RMS Voltage {}", shared_adc_resources.rms_voltage);
             defmt::println!("RMS Current 1 {}", shared_adc_resources.rms_current_1);
             defmt::println!("RMS Current 2 {}", shared_adc_resources.rms_current_2);
+
+            // Calculate real power
+
+            let power_1_real = voltage_correction_ratio
+                * current_1_correction_ratio
+                * (shared_adc_resources.sum_power_1
+                    / shared_adc_resources.count_energy_usage_measurements as i128)
+                    as f64;
+
+            let power_2_real = voltage_correction_ratio
+                * current_2_correction_ratio
+                * (shared_adc_resources.sum_power_2
+                    / shared_adc_resources.count_energy_usage_measurements as i128)
+                    as f64;
+
+            // Calculate apparent power
+
+            let power_1_apparent =
+                shared_adc_resources.rms_voltage * shared_adc_resources.rms_current_1;
+            let power_2_apparent =
+                shared_adc_resources.rms_voltage * shared_adc_resources.rms_current_2;
+
+            // Calculate power factor
+
+            let power_factor_1 = power_1_real / power_1_apparent;
+            let power_factor_2 = power_2_real / power_2_apparent;
+
+            defmt::println!("Real Power 1 {}", power_1_real);
+            defmt::println!("Real Power 2 {}", power_2_real);
+            defmt::println!("Apparent Power 1 {}", power_1_apparent);
+            defmt::println!("Apparent Power 2 {}", power_2_apparent);
+            defmt::println!("Power Factor 1 {}", power_factor_1);
+            defmt::println!("Power Factor 2 {}", power_factor_2);
+            defmt::println!(
+                "Energy Usage Measurements Taken {}",
+                shared_adc_resources.count_energy_usage_measurements
+            );
         })
     }
 }
