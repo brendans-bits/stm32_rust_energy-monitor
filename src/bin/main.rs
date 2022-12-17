@@ -10,6 +10,7 @@ use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memo
 mod app {
 
     use core::fmt::Write;
+    use heapless::Vec;
     use stm32f4xx_hal::{
         adc::{
             config::{AdcConfig, Dma, SampleTime, Scan, Sequence},
@@ -26,16 +27,54 @@ mod app {
     type DMATransfer =
         Transfer<Stream0<DMA2>, 0, Adc<ADC1>, PeripheralToMemory, &'static mut [u16; 3]>;
 
+    #[derive(Debug, Default)]
+    enum MeasurementTypes {
+        Voltage,
+        #[default]
+        Current,
+    }
+
+    #[derive(Debug, Default)]
+    pub struct MeasurementParameters {
+        pin: u8,
+        measurement_type: MeasurementTypes,
+        calibration_value: f64,
+        buffer: Vec<u16, 10>,
+        sum_simple_moving_average: u128,
+    }
+
+    //impl MeasurementParameters {
+    //    fn new() -> Self {
+    //        Default::default()
+    //    }
+    //}
+
+    //impl Default for MeasurementParameters {
+    //    fn default() -> Self {
+    //        MeasurementParameters {
+    //            pin: 0,
+    //            measurement_type: MeasurementTypes::Current,
+    //            calibration_value: 0.0,
+    //           buffer: Vec::new(),
+    //        }
+    //    }
+    //}
+
     #[shared]
     struct Shared {
         transfer: DMATransfer,
         adc_timer: CounterHz<TIM3>,
         counter: i32,
+        //voltage: MeasurementParameters,
+        //current: MeasurementParameters,
+        adc_value_voltage: u16,
+        adc_value_current: u16,
+        measurements: Vec<MeasurementParameters, 8>,
     }
 
     #[local]
     struct Local {
-        buffer: Option<&'static mut [u16; 3]>,
+        dma_buffer: Option<&'static mut [u16; 3]>,
         serial_tx: Tx<USART1>,
     }
 
@@ -89,7 +128,29 @@ mod app {
 
         let mut counter: i32 = 0;
 
-        //polling::spawn_after(1.secs()).ok();
+        let mut measurements: Vec<MeasurementParameters, 8> = Vec::new();
+
+        let voltage = MeasurementParameters {
+            pin: 0,
+            measurement_type: MeasurementTypes::Voltage,
+            calibration_value: 0.0,
+            buffer: Vec::new(),
+            sum_simple_moving_average: 0,
+        };
+
+        let current = MeasurementParameters {
+            pin: 1,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 0.0,
+            buffer: Vec::new(),
+            sum_simple_moving_average: 0,
+        };
+
+        measurements.push(voltage);
+        measurements.push(current);
+
+        let mut adc_value_voltage: u16 = 0;
+        let mut adc_value_current: u16 = 0;
 
         task_1::spawn().unwrap();
 
@@ -98,9 +159,14 @@ mod app {
                 transfer,
                 adc_timer,
                 counter,
+                //voltage,
+                //current,
+                adc_value_current,
+                adc_value_voltage,
+                measurements,
             },
             Local {
-                buffer: second_buffer,
+                dma_buffer: second_buffer,
                 serial_tx,
             },
             init::Monotonics(),
@@ -111,11 +177,11 @@ mod app {
     fn task_1(mut cx: task_1::Context) {
         cx.shared.adc_timer.lock(|adc_timer| {
             adc_timer.listen(Event::Update);
-            adc_timer.start(1000.Hz()).unwrap();
+            adc_timer.start(10000.Hz()).unwrap();
         });
     }
 
-    #[task(binds = TIM3, shared = [transfer, adc_timer, counter])]
+    #[task(binds = TIM3, shared = [transfer, adc_timer, counter, measurements])]
     fn start_adc(mut cx: start_adc::Context) {
         cx.shared.transfer.lock(|transfer| {
             transfer.start(|adc| {
@@ -123,44 +189,63 @@ mod app {
             });
         });
 
-        cx.shared.counter.lock(|counter| {
-            if counter == &mut 1999 {
-                cx.shared.adc_timer.lock(|adc_timer| {
-                    adc_timer.cancel().unwrap();
-                });
-            }
-        });
-
         cx.shared.adc_timer.lock(|adc_timer| {
             adc_timer.clear_interrupt(Event::Update);
         });
     }
 
-    #[task(binds = DMA2_STREAM0, shared = [transfer, adc_timer, counter], local = [buffer, serial_tx])]
+    #[task(binds = DMA2_STREAM0, shared = [transfer, adc_timer, counter, measurements], local = [dma_buffer, serial_tx])]
     fn dma(mut cx: dma::Context) {
         //let dma::Context { mut shared, local } = cx;
-        let buffer = cx.shared.transfer.lock(|transfer| {
-            let (buffer, _) = transfer
-                .next_transfer(cx.local.buffer.take().unwrap())
+        let dma_buffer = cx.shared.transfer.lock(|transfer| {
+            let (dma_buffer, _) = transfer
+                .next_transfer(cx.local.dma_buffer.take().unwrap())
                 .unwrap();
 
-            buffer
+            dma_buffer
         });
 
-        let voltage = buffer[0];
-        let current_1 = buffer[1];
-        let current_2 = buffer[2];
+        cx.shared.measurements.lock(|measurements| {
+            for i in 0..measurements.len() {
+                measurements[i].buffer.push(dma_buffer[i]);
 
-        *cx.local.buffer = Some(buffer);
+                if measurements[i].buffer.len() > 9 {
+                    calculate_adc_offset::spawn();
+                }
+            }
+        });
+
+        *cx.local.dma_buffer = Some(dma_buffer);
 
         cx.shared.counter.lock(|counter| {
             *counter = *counter + 1;
-            writeln!(
-                cx.local.serial_tx,
-                "{}, {}, {}, {} \r",
-                counter, voltage, current_1, current_2
-            )
-            .unwrap();
         });
     }
+
+    #[task(shared = [measurements, counter, adc_timer])]
+    fn calculate_adc_offset(mut cx: calculate_adc_offset::Context) {
+        cx.shared.measurements.lock(|measurements| {
+            for i in 0..measurements.len() {
+                measurements[i].sum_simple_moving_average = 
+                    measurements[i].sum_simple_moving_average +
+                        (measurements[i].buffer.iter().sum::<u16>() as u128
+                        / measurements[i].buffer.len() as u128);
+                    measurements[i].buffer.remove(0);
+            }
+        });
+        cx.shared.counter.lock(|counter| {
+            if counter == &mut 1999 {
+                cx.shared.adc_timer.lock(|adc_timer| {
+                    adc_timer.cancel().unwrap();
+                });
+                cx.shared.measurements.lock(|measurements| {
+                    for i in 0..measurements.len() {
+                        defmt::println!("{}", measurements[i].sum_simple_moving_average/2000)
+                    }
+                })
+            }
+        });
+
+    }
+
 }
