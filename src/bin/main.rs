@@ -6,87 +6,205 @@
 use rtic::app;
 use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memory layout
 
-#[app(device = stm32f4xx_hal::pac, peripherals = true, dispatchers = [SPI1])]
+#[rtic::app(device = stm32f4xx_hal::pac, dispatchers = [EXTI0])]
 mod app {
 
     use core::fmt::Write;
     use heapless::Vec;
     use libm::sqrt;
-    //use rtt_target::{rprintln, rtt_init_print};
     use stm32f4xx_hal::{
         adc::{
-            config::{AdcConfig, SampleTime},
+            config::{AdcConfig, Dma, SampleTime, Scan, Sequence},
             Adc,
         },
-        gpio::{self, Analog, Input, Pin},
+        dma::{config::DmaConfig, PeripheralToMemory, Stream0, StreamsTuple, Transfer},
+        gpio::gpioa,
         pac::*,
         prelude::*,
         serial::{Config, Serial, Tx},
-        timer::{CounterUs, Event},
+        timer::{CounterHz, CounterUs, Event},
     };
 
-    pub struct SharedADCResources {
-        //ADC
-        adc: Adc<ADC1>,
-        //Timers and counters
-        step_2_timer_adc_sampling_loop: CounterUs<TIM3>,
-        step_3_timer_energy_sampling_loop: CounterUs<TIM4>,
-        count_time: CounterUs<TIM5>,
-        count_adc_offset_measurements: u16,
-        count_energy_usage_measurements: u16,
-        //Pins
-        pin_voltage: Pin<'A', 7, Analog>,
-        pin_current_1: Pin<'A', 0, Analog>,
-        pin_current_2: Pin<'A', 3, Analog>,
-        //Buffers
-        buffer_voltage: Vec<u16, 10>,
-        buffer_current_1: Vec<u16, 10>,
-        buffer_current_2: Vec<u16, 10>,
-        //Simple moving averages
-        simple_moving_average_voltage: u128,
-        simple_moving_average_current_1: u128,
-        simple_moving_average_current_2: u128,
-        // Sum
-        sum_voltage: u128,
-        sum_current_1: u128,
-        sum_current_2: u128,
-        // ADC averages
-        adc_offset_voltage: u128,
-        adc_offset_current_1: u128,
-        adc_offset_current_2: u128,
-        // ADC offset removed
-        offset_removed_voltage: i128,
-        offset_removed_current_1: i128,
-        offset_removed_current_2: i128,
-        // Squared offset removed
-        squared_offset_removed_voltage: i128,
-        squared_offset_removed_current_1: i128,
-        squared_offset_removed_current_2: i128,
-        // Sum offset removed
-        sum_squared_voltage: i128,
-        sum_squared_current_1: i128,
-        sum_squared_current_2: i128,
-        // RMS values
-        rms_voltage: f64,
-        rms_current_1: f64,
-        rms_current_2: f64,
-        // Power - Instantaneous
-        instantaneous_power_1: i128,
-        instantaneous_power_2: i128,
-        // Power - Sum
-        sum_power_1: i128,
-        sum_power_2: i128,
+    type DMATransfer =
+        Transfer<Stream0<DMA2>, 0, Adc<ADC1>, PeripheralToMemory, &'static mut [u16; 8]>;
+
+    #[derive(Debug, Default, PartialEq)]
+    enum MeasurementTypes {
+        Voltage,
+        #[default]
+        Current,
+    }
+
+    #[derive(Debug, Default)]
+    pub struct MeasurementParameters {
+        name: &'static str,
+        pin: u16,
+        measurement_type: MeasurementTypes,
+        calibration_value: f64,
+        buffer: u16,
+        sum_raw_adc_input: i128,
+        adc_offset: i128,
+        corrected_value: i128,
+        sum_squared_corrected_values: i128,
+        sum_power: i128,
+        rms_value: f64,
+        correction_ratio: f64,
+    }
+
+    #[shared]
+    struct Shared {
+        transfer: DMATransfer,
+        adc_timer: CounterHz<TIM3>,
+        counter: i32,
+        measurements: Vec<MeasurementParameters, 8>,
+        serial_tx: Tx<USART1>,
+    }
+
+    #[local]
+    struct Local {
+        dma_buffer: Option<&'static mut [u16; 8]>,
+        timer_step_1_start_measurement_loop: CounterUs<TIM2>,
     }
 
     #[init]
-    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
-        let device_peripherals = ctx.device;
+    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
+        let device = cx.device;
 
-        let rcc = device_peripherals.RCC.constrain();
-
+        let rcc = device.RCC.constrain();
         let clocks = rcc.cfgr.use_hse(25.MHz()).sysclk(100.MHz()).freeze();
 
-        let mut timer_step_1_start_measurement_loop = device_peripherals.TIM2.counter_us(&clocks);
+        let gpioa = device.GPIOA.split();
+        let pin_7 = gpioa.pa7.into_analog();
+        let pin_6 = gpioa.pa6.into_analog();
+        let pin_5 = gpioa.pa5.into_analog();
+        let pin_4 = gpioa.pa4.into_analog();
+        let pin_3 = gpioa.pa3.into_analog();
+        let pin_2 = gpioa.pa2.into_analog();
+        let pin_1 = gpioa.pa1.into_analog();
+        let pin_0 = gpioa.pa0.into_analog();
+        //let pin_current_1 = gpioa.pa0.into_analog();
+        //let pin_current_2 = gpioa.pa3.into_analog();
+
+        let dma = StreamsTuple::new(device.DMA2);
+
+        let config_dma = DmaConfig::default()
+            .transfer_complete_interrupt(true)
+            .memory_increment(true)
+            .double_buffer(false);
+
+        let config_adc = AdcConfig::default()
+            .dma(Dma::Continuous)
+            .scan(Scan::Enabled);
+
+        let mut adc = Adc::adc1(device.ADC1, true, config_adc);
+
+        adc.configure_channel(&pin_0, Sequence::One, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_1, Sequence::Two, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_2, Sequence::Three, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_3, Sequence::Four, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_4, Sequence::Five, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_5, Sequence::Six, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_6, Sequence::Seven, SampleTime::Cycles_480);
+        adc.configure_channel(&pin_7, Sequence::Eight, SampleTime::Cycles_480);
+
+        let first_buffer = cortex_m::singleton!(: [u16; 8] = [0; 8]).unwrap();
+        let second_buffer = Some(cortex_m::singleton!(: [u16; 8] = [0; 8]).unwrap());
+        let transfer = Transfer::init_peripheral_to_memory(dma.0, adc, first_buffer, None, config_dma);
+
+        // Set up Serial
+        let tx_pin = gpioa.pa9.into_alternate();
+        // Create a tx abstraction for serial transmission
+        let serial_tx = Serial::tx(
+            device.USART1,
+            tx_pin,
+            Config::default()
+                .baudrate(1152000.bps())
+                .wordlength_8()
+                .parity_none(),
+            &clocks,
+        )
+        .unwrap();
+
+        let adc_timer = device.TIM3.counter_hz(&clocks);
+
+        let counter: i32 = 0;
+
+        let mut measurements: Vec<MeasurementParameters, 8> = Vec::new();
+
+        let current_7 = MeasurementParameters {
+            name: "Current_7",
+            pin: 7,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 1.0,
+            ..Default::default()
+        };
+
+        let current_6 = MeasurementParameters {
+            name: "Current_6",
+            pin: 6,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 57.26,
+            ..Default::default()
+        };
+
+        let current_5 = MeasurementParameters {
+            name: "Current_5",
+            pin: 5,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 1.0,
+            ..Default::default()
+        };
+
+        let current_4 = MeasurementParameters {
+            name: "Current_4",
+            pin: 4,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 1.0,
+            ..Default::default()
+        };
+
+        let current_3 = MeasurementParameters {
+            name: "Current_3",
+            pin: 3,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 1.0,
+            ..Default::default()
+        };
+
+        let current_2 = MeasurementParameters {
+            name: "Current_2",
+            pin: 2,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 19.00,
+            ..Default::default()
+        };
+
+        let current_1 = MeasurementParameters {
+            name: "Current_1",
+            pin: 1,
+            measurement_type: MeasurementTypes::Current,
+            calibration_value: 1.0,
+            ..Default::default()
+        };
+
+        let voltage = MeasurementParameters {
+            name: "Voltage",
+            pin: 0,
+            measurement_type: MeasurementTypes::Voltage,
+            calibration_value: 266.67,
+            ..Default::default()
+        };
+
+        measurements.push(voltage).unwrap();
+        measurements.push(current_1).unwrap();
+        measurements.push(current_2).unwrap();
+        measurements.push(current_3).unwrap();
+        measurements.push(current_4).unwrap();
+        measurements.push(current_5).unwrap();
+        measurements.push(current_6).unwrap();
+        measurements.push(current_7).unwrap();
+
+        let mut timer_step_1_start_measurement_loop = device.TIM2.counter_us(&clocks);
 
         timer_step_1_start_measurement_loop
             .start(10000.millis())
@@ -99,529 +217,193 @@ mod app {
             cortex_m::peripheral::NVIC::unmask(interrupt::TIM4);
         }
 
-        let gpioa = device_peripherals.GPIOA.split();
-
-        // Set up Serial
-        let tx_pin = gpioa.pa9.into_alternate();
-        // Create a tx abstraction for serial transmission
-        let serial_tx = Serial::tx(
-            device_peripherals.USART1,
-            tx_pin,
-            Config::default()
-                .baudrate(1152000.bps())
-                .wordlength_8()
-                .parity_none(),
-            &clocks,
-        )
-        .unwrap();
-
-        let voltage_calibration_value: f64 = 394.9; // rough value only!
-        let current_1_calibration_value: f64 = 27.87; // rough value only!
-        let current_2_calibration_value: f64 = 85.04; // rough value only!
-
-        let shared_adc_resources = SharedADCResources {
-            //ADC
-            adc: Adc::adc1(device_peripherals.ADC1, true, AdcConfig::default()),
-            //Timers
-            step_2_timer_adc_sampling_loop: device_peripherals.TIM3.counter_us(&clocks),
-            step_3_timer_energy_sampling_loop: device_peripherals.TIM4.counter_us(&clocks),
-            count_time: device_peripherals.TIM5.counter_us(&clocks),
-            count_adc_offset_measurements: 0,
-            count_energy_usage_measurements: 0,
-            //Pins
-            pin_voltage: gpioa.pa7.into_analog(),
-            pin_current_1: gpioa.pa0.into_analog(),
-            pin_current_2: gpioa.pa3.into_analog(),
-            //Buffers
-            buffer_voltage: Vec::new(),
-            buffer_current_1: Vec::new(),
-            buffer_current_2: Vec::new(),
-            //SMA
-            simple_moving_average_voltage: 0,
-            simple_moving_average_current_1: 0,
-            simple_moving_average_current_2: 0,
-
-            offset_removed_voltage: 0,
-            offset_removed_current_1: 0,
-            offset_removed_current_2: 0,
-
-            squared_offset_removed_voltage: 0,
-            squared_offset_removed_current_1: 0,
-            squared_offset_removed_current_2: 0,
-
-            sum_squared_voltage: 0,
-            sum_squared_current_1: 0,
-            sum_squared_current_2: 0,
-
-            adc_offset_voltage: 0,
-            adc_offset_current_1: 0,
-            adc_offset_current_2: 0,
-
-            sum_voltage: 0,
-            sum_current_1: 0,
-            sum_current_2: 0,
-
-            rms_voltage: 0.0,
-            rms_current_1: 0.0,
-            rms_current_2: 0.0,
-            // Power - Instantaneous
-            instantaneous_power_1: 0,
-            instantaneous_power_2: 0,
-            // Power - Sum
-            sum_power_1: 0,
-            sum_power_2: 0,
-        };
-
         (
             Shared {
-                shared_adc_resources,
+                transfer,
+                adc_timer,
+                counter,
+                measurements,
+                serial_tx,
             },
             Local {
+                dma_buffer: second_buffer,
                 timer_step_1_start_measurement_loop,
-                serial_tx,
-                voltage_calibration_value,
-                current_1_calibration_value,
-                current_2_calibration_value,
             },
             init::Monotonics(),
         )
     }
 
-    #[shared]
-    struct Shared {
-        shared_adc_resources: SharedADCResources,
-    }
+    //---------
+    // Task 1: Start the ADC timer
+    //---------
 
-    #[local]
-    struct Local {
-        timer_step_1_start_measurement_loop: CounterUs<TIM2>,
-        serial_tx: Tx<USART1>,
-        voltage_calibration_value: f64,
-        current_1_calibration_value: f64,
-        current_2_calibration_value: f64,
-    }
-
-    // Task TIM2 is purely to deal with the TIM2 interrupt and call the main measurement loop.
-    #[task(binds = TIM2, local = [timer_step_1_start_measurement_loop], shared = [shared_adc_resources])]
-    fn step_1_start_measurement_loop(mut ctx: step_1_start_measurement_loop::Context) {
-        let step_1_start_measurement_loop::LocalResources {
-            //count_measurement,
-            timer_step_1_start_measurement_loop,
-        } = ctx.local;
-
+    #[task(binds=TIM2, shared = [adc_timer, measurements, counter], local = [timer_step_1_start_measurement_loop])]
+    fn task_1_start_adc(mut cx: task_1_start_adc::Context) {
         // Clear the interrupt so that the main measurement loop runs again
-        timer_step_1_start_measurement_loop.clear_interrupt(Event::Update);
+        cx.local
+            .timer_step_1_start_measurement_loop
+            .clear_interrupt(Event::Update);
 
-        defmt::println!("Start measurement loop");
+        cx.shared.counter.lock(|counter| {
+            *counter = 0;
+        });
 
-        ctx.shared
-            .shared_adc_resources
-            .lock(|shared_adc_resources| {
-                shared_adc_resources.count_adc_offset_measurements = 0;
-
-                shared_adc_resources.sum_voltage = 0;
-
-                shared_adc_resources.sum_current_1 = 0;
-
-                shared_adc_resources.sum_current_2 = 0;
-
-                shared_adc_resources
-                    .count_time
-                    .start(3000.millis())
-                    .unwrap();
-
-                shared_adc_resources
-                    .step_2_timer_adc_sampling_loop
-                    .start(1000.micros())
-                    .unwrap();
-                shared_adc_resources
-                    .step_2_timer_adc_sampling_loop
-                    .listen(Event::Update);
-            });
-    }
-
-    #[task(binds = TIM3, local = [serial_tx], shared = [shared_adc_resources])]
-    fn step_2_get_adc_offset(ctx: step_2_get_adc_offset::Context) {
-        let step_2_get_adc_offset::LocalResources { serial_tx } = ctx.local;
-
-        let step_2_get_adc_offset::SharedResources {
-            mut shared_adc_resources,
-        } = ctx.shared;
-
-        shared_adc_resources.lock(|shared_adc_resources| {
-            shared_adc_resources
-                .step_2_timer_adc_sampling_loop
-                .clear_interrupt(Event::Update);
-
-            shared_adc_resources
-                .buffer_voltage
-                .push(
-                    shared_adc_resources
-                        .adc
-                        .convert(&shared_adc_resources.pin_voltage, SampleTime::Cycles_3),
-                )
-                .unwrap();
-
-            shared_adc_resources
-                .buffer_current_1
-                .push(
-                    shared_adc_resources
-                        .adc
-                        .convert(&shared_adc_resources.pin_current_1, SampleTime::Cycles_3),
-                )
-                .unwrap();
-
-            shared_adc_resources
-                .buffer_current_2
-                .push(
-                    shared_adc_resources
-                        .adc
-                        .convert(&shared_adc_resources.pin_current_2, SampleTime::Cycles_3),
-                )
-                .unwrap();
-
-            if shared_adc_resources.buffer_voltage.len() > 9 {
-                shared_adc_resources.simple_moving_average_voltage =
-                    shared_adc_resources.buffer_voltage.iter().sum::<u16>() as u128
-                        / shared_adc_resources.buffer_voltage.len() as u128;
-
-                shared_adc_resources.simple_moving_average_current_1 =
-                    shared_adc_resources.buffer_current_1.iter().sum::<u16>() as u128
-                        / shared_adc_resources.buffer_current_1.len() as u128;
-
-                shared_adc_resources.simple_moving_average_current_2 =
-                    shared_adc_resources.buffer_current_2.iter().sum::<u16>() as u128
-                        / shared_adc_resources.buffer_current_2.len() as u128;
-
-                shared_adc_resources.sum_voltage = shared_adc_resources.sum_voltage
-                    + shared_adc_resources.simple_moving_average_voltage;
-
-                shared_adc_resources.sum_current_1 = shared_adc_resources.sum_current_1
-                    + shared_adc_resources.simple_moving_average_current_1;
-
-                shared_adc_resources.sum_current_2 = shared_adc_resources.sum_current_2
-                    + shared_adc_resources.simple_moving_average_current_2 as u128;
-
-                shared_adc_resources.buffer_voltage.remove(0);
-                shared_adc_resources.buffer_current_1.remove(0);
-                shared_adc_resources.buffer_current_2.remove(0);
-
-                shared_adc_resources.count_adc_offset_measurements =
-                    shared_adc_resources.count_adc_offset_measurements + 1;
-
-                writeln!(
-                    serial_tx,
-                    "{}, {}, {}, {} \r",
-                    shared_adc_resources
-                        .count_time
-                        .now()
-                        .duration_since_epoch()
-                        .ticks(),
-                    shared_adc_resources.simple_moving_average_voltage,
-                    shared_adc_resources.simple_moving_average_current_1,
-                    shared_adc_resources.simple_moving_average_current_2
-                )
-                .unwrap();
+        cx.shared.measurements.lock(|m| {
+            for i in 0..m.len() {
+                m[i].buffer = 0;
+                m[i].sum_raw_adc_input = 0;
+                m[i].adc_offset = 0;
+                m[i].corrected_value = 0;
+                m[i].sum_squared_corrected_values = 0;
+                m[i].sum_power = 0;
+                m[i].rms_value = 0.0;
+                m[i].correction_ratio = 0.0;
             }
+        });
 
-            if shared_adc_resources.count_adc_offset_measurements > 2000 {
-                shared_adc_resources
-                    .step_2_timer_adc_sampling_loop
-                    .cancel()
-                    .unwrap();
-
-                shared_adc_resources.adc_offset_voltage = shared_adc_resources.sum_voltage
-                    / shared_adc_resources.count_adc_offset_measurements as u128;
-                //defmt::println!(
-                //    "ADC Voltage average {}",
-                //    shared_adc_resources.adc_offset_voltage
-                //);
-
-                shared_adc_resources.adc_offset_current_1 = shared_adc_resources.sum_current_1
-                    / shared_adc_resources.count_adc_offset_measurements as u128;
-                //defmt::println!(
-                //    "ADC Current 1 average {}",
-                //    shared_adc_resources.adc_offset_current_1
-                //);
-
-                shared_adc_resources.adc_offset_current_2 = shared_adc_resources.sum_current_2
-                    / shared_adc_resources.count_adc_offset_measurements as u128;
-                //defmt::println!(
-                //    "ADC Current 2 average {}",
-                //    shared_adc_resources.adc_offset_current_2
-                //);
-
-                defmt::println!(
-                    "Time taken for adc offset measurement {}",
-                    shared_adc_resources
-                        .count_time
-                        .now()
-                        .duration_since_epoch()
-                        .ticks()
-                );
-
-                shared_adc_resources.count_time.cancel().unwrap();
-
-                shared_adc_resources.count_energy_usage_measurements = 0;
-                shared_adc_resources.buffer_voltage = Vec::new();
-                shared_adc_resources.buffer_current_1 = Vec::new();
-                shared_adc_resources.buffer_current_2 = Vec::new();
-                shared_adc_resources.sum_squared_voltage = 0;
-                shared_adc_resources.sum_squared_current_1 = 0;
-                shared_adc_resources.sum_squared_current_2 = 0;
-                shared_adc_resources.sum_power_1 = 0;
-                shared_adc_resources.sum_power_2 = 0;
-
-                shared_adc_resources
-                    .count_time
-                    .start(3000.millis())
-                    .unwrap();
-
-                shared_adc_resources
-                    .step_3_timer_energy_sampling_loop
-                    .start(1000.micros())
-                    .unwrap();
-
-                shared_adc_resources
-                    .step_3_timer_energy_sampling_loop
-                    .listen(Event::Update);
-            };
-        })
+        cx.shared.adc_timer.lock(|adc_timer| {
+            adc_timer.listen(Event::Update);
+            adc_timer.start(1000.Hz()).unwrap();
+        });
     }
 
-    #[task(binds = TIM4, shared = [shared_adc_resources])]
-    fn step_3_measure_energy_usage(ctx: step_3_measure_energy_usage::Context) {
-        let step_3_measure_energy_usage::SharedResources {
-            mut shared_adc_resources,
-        } = ctx.shared;
+    //-----------
+    // Task 2: Start conversion with ADC timer interrupt is triggered
+    //-----------
 
-        shared_adc_resources.lock(|shared_adc_resources| {
-            shared_adc_resources
-                .step_3_timer_energy_sampling_loop
-                .clear_interrupt(Event::Update);
+    #[task(binds = TIM3, shared = [transfer, adc_timer, counter, measurements])]
+    fn task_2_start_adc_conversion(mut cx: task_2_start_adc_conversion::Context) {
+        cx.shared.transfer.lock(|transfer| {
+            transfer.start(|adc| {
+                adc.start_conversion();
+            });
+        });
 
-            // Get ADC values
+        cx.shared.adc_timer.lock(|adc_timer| {
+            adc_timer.clear_interrupt(Event::Update);
+        });
+    }
 
-            shared_adc_resources
-                .buffer_voltage
-                .push(
-                    shared_adc_resources
-                        .adc
-                        .convert(&shared_adc_resources.pin_voltage, SampleTime::Cycles_3),
-                )
+    //---------
+    // Task 3: Retrieve ADC data from DMA buffer once it is available
+    //---------
+
+    #[task(binds = DMA2_STREAM0, shared = [transfer, adc_timer, counter, measurements, serial_tx], local = [dma_buffer])]
+    fn task_3_retrieve_adc_data(mut cx: task_3_retrieve_adc_data::Context) {
+        //let dma::Context { mut shared, local } = cx;
+        let dma_buffer = cx.shared.transfer.lock(|transfer| {
+            let (dma_buffer, _) = transfer
+                .next_transfer(cx.local.dma_buffer.take().unwrap())
                 .unwrap();
+            dma_buffer
+        });
 
-            shared_adc_resources
-                .buffer_current_1
-                .push(
-                    shared_adc_resources
-                        .adc
-                        .convert(&shared_adc_resources.pin_current_1, SampleTime::Cycles_3),
-                )
-                .unwrap();
+        cx.shared.measurements.lock(|m| {
+            for i in 0..m.len() {
+                let pin = m[i].pin as usize;
+                m[i].buffer = dma_buffer[pin];
+            }
+        });
 
-            shared_adc_resources
-                .buffer_current_2
-                .push(
-                    shared_adc_resources
-                        .adc
-                        .convert(&shared_adc_resources.pin_current_2, SampleTime::Cycles_3),
-                )
-                .unwrap();
+        cx.shared.counter.lock(|counter| {
+            *counter = *counter + 1;
 
-            if shared_adc_resources.buffer_voltage.len() > 9 {
-                
-                // Get simple moving averages for ADC values
+            if counter <= &mut 2000 {
+                //defmt::println!("{}", counter);
+                step_4_calculate_adc_offset::spawn().unwrap();
+            } else {
+                step_5_obtain_energy_flow::spawn().unwrap();
+            }
+        });
 
-                shared_adc_resources.simple_moving_average_voltage =
-                    shared_adc_resources.buffer_voltage.iter().sum::<u16>() as u128
-                        / shared_adc_resources.buffer_voltage.len() as u16 as u128;
+        *cx.local.dma_buffer = Some(dma_buffer);
+    }
 
-                shared_adc_resources.simple_moving_average_current_1 =
-                    shared_adc_resources.buffer_current_1.iter().sum::<u16>() as u128
-                        / shared_adc_resources.buffer_current_1.len() as u16 as u128;
+    #[task(shared = [measurements, counter, adc_timer])]
+    fn step_4_calculate_adc_offset(mut cx: step_4_calculate_adc_offset::Context) {
+        cx.shared.measurements.lock(|m| {
+            for i in 0..m.len() {
+                m[i].sum_raw_adc_input = m[i].sum_raw_adc_input + m[i].buffer as i128;
+            }
+        });
 
-                shared_adc_resources.simple_moving_average_current_2 =
-                    shared_adc_resources.buffer_current_2.iter().sum::<u16>() as u128
-                        / shared_adc_resources.buffer_current_2.len() as u16 as u128;
-
-                // Remove the ADC offset from the simple moving average
-
-                shared_adc_resources.offset_removed_voltage =
-                    shared_adc_resources.simple_moving_average_voltage as i128
-                        - shared_adc_resources.adc_offset_voltage as i128;
-
-                shared_adc_resources.offset_removed_current_1 =
-                    shared_adc_resources.simple_moving_average_current_1 as i128
-                        - shared_adc_resources.adc_offset_current_1 as i128;
-
-                shared_adc_resources.offset_removed_current_2 =
-                    shared_adc_resources.simple_moving_average_current_2 as i128
-                        - shared_adc_resources.adc_offset_current_2 as i128;
-
-                // Square the offset removed values
-
-                shared_adc_resources.squared_offset_removed_voltage = shared_adc_resources
-                    .offset_removed_voltage
-                    * shared_adc_resources.offset_removed_voltage;
-
-                shared_adc_resources.squared_offset_removed_current_1 = shared_adc_resources
-                    .offset_removed_current_1
-                    * shared_adc_resources.offset_removed_current_1;
-
-                shared_adc_resources.squared_offset_removed_current_2 = shared_adc_resources
-                    .offset_removed_current_2
-                    * shared_adc_resources.offset_removed_current_2;
-
-                // Sum the squared values
-
-                shared_adc_resources.sum_squared_voltage = shared_adc_resources.sum_squared_voltage
-                    + shared_adc_resources.squared_offset_removed_voltage;
-
-                shared_adc_resources.sum_squared_current_1 = shared_adc_resources
-                    .sum_squared_current_1
-                    + shared_adc_resources.squared_offset_removed_current_1;
-
-                shared_adc_resources.sum_squared_current_2 = shared_adc_resources
-                    .sum_squared_current_2
-                    + shared_adc_resources.squared_offset_removed_current_2;
-
-                // Calculate instantaneous power
-
-                shared_adc_resources.instantaneous_power_1 = shared_adc_resources
-                    .offset_removed_voltage
-                    * shared_adc_resources.offset_removed_current_1;
-
-                shared_adc_resources.instantaneous_power_2 = shared_adc_resources
-                    .offset_removed_voltage
-                    * shared_adc_resources.offset_removed_current_2;
-
-                // Sum instantaneous power
-
-                shared_adc_resources.sum_power_1 =
-                    shared_adc_resources.sum_power_1 + shared_adc_resources.instantaneous_power_1;
-
-                shared_adc_resources.sum_power_2 =
-                    shared_adc_resources.sum_power_2 + shared_adc_resources.instantaneous_power_2;
-
-                shared_adc_resources.buffer_voltage.remove(0);
-                shared_adc_resources.buffer_current_1.remove(0);
-                shared_adc_resources.buffer_current_2.remove(0);
-
-                shared_adc_resources.count_energy_usage_measurements =
-                    shared_adc_resources.count_energy_usage_measurements + 1;
-
-                if shared_adc_resources.count_energy_usage_measurements > 2000 {
-                    shared_adc_resources
-                        .step_3_timer_energy_sampling_loop
-                        .cancel()
-                        .unwrap();
-
-                    //defmt::println!("Finished");
-
-                    defmt::println!(
-                        "Time taken for energy usage measurements {}",
-                        shared_adc_resources
-                            .count_time
-                            .now()
-                            .duration_since_epoch()
-                            .ticks()
-                    );
-
-                    shared_adc_resources.count_time.cancel().unwrap();
-
-                    step_4_post_measurement_calculations::spawn().unwrap();
-                }
+        cx.shared.counter.lock(|counter| {
+            if counter == &mut 2000 {
+                cx.shared.measurements.lock(|m| {
+                    for i in 0..m.len() {
+                        m[i].adc_offset = m[i].sum_raw_adc_input / *counter as i128;
+                        defmt::println!("ADC Offset for {}, {}", m[i].name, m[i].adc_offset)
+                    }
+                });
+                step_5_obtain_energy_flow::spawn().unwrap();
             }
         });
     }
 
-    #[task(
-        local = [
-        voltage_calibration_value,
-        current_1_calibration_value,
-        current_2_calibration_value,
-    ], 
-    shared = [shared_adc_resources])]
-    fn step_4_post_measurement_calculations(ctx: step_4_post_measurement_calculations::Context) {
-        let step_4_post_measurement_calculations::SharedResources {
-            mut shared_adc_resources,
-        } = ctx.shared;
+    #[task(shared = [measurements, counter, adc_timer, serial_tx])]
+    fn step_5_obtain_energy_flow(mut cx: step_5_obtain_energy_flow::Context) {
+        cx.shared.measurements.lock(|m| {
+            for i in 0..m.len() {
+                m[i].corrected_value = m[i].buffer as i128 - m[i].adc_offset;
 
-        let step_4_post_measurement_calculations::LocalResources {
-            voltage_calibration_value,
-            current_1_calibration_value,
-            current_2_calibration_value,
-        } = ctx.local;
+                let squared_corrected_value = m[i].corrected_value * m[i].corrected_value;
+                m[i].sum_squared_corrected_values =
+                    m[i].sum_squared_corrected_values + squared_corrected_value;
+            }
 
-        shared_adc_resources.lock(|shared_adc_resources| {
-            let voltage_correction_ratio =
-                *voltage_calibration_value * ((3300.0 / 1000.0) / 4096.0);
-            let current_1_correction_ratio =
-                *current_1_calibration_value * ((3300.0 / 1000.0) / 4096.0);
-            let current_2_correction_ratio =
-                *current_2_calibration_value * ((3300.0 / 1000.0) / 4096.0);
+            for i in 1..m.len() {
+                let instantaneous_power = m[i].corrected_value * m[0].corrected_value;
+                m[i].sum_power = m[i].sum_power + instantaneous_power;
+            }
+        });
 
-            // Calculate RMS values
+        cx.shared.counter.lock(|counter| {
+            if counter >= &mut 4000 {
+                cx.shared.adc_timer.lock(|adc_timer| {
+                    adc_timer.cancel().unwrap();
+                });
+                defmt::println!("Finished");
 
-            shared_adc_resources.rms_voltage = voltage_correction_ratio
-                * sqrt(
-                    shared_adc_resources.sum_squared_voltage as f64
-                        / shared_adc_resources.count_energy_usage_measurements as f64,
-                );
+                cx.shared.measurements.lock(|m| {
+                    for i in 0..m.len() {
+                        if m[i].adc_offset > 1000 {
+                            m[i].correction_ratio =
+                                m[i].calibration_value * ((3300.0 / 1000.0) / 4096.0);
 
-            shared_adc_resources.rms_current_1 = current_1_correction_ratio
-                * sqrt(
-                    shared_adc_resources.sum_squared_current_1 as f64
-                        / shared_adc_resources.count_energy_usage_measurements as f64,
-                );
+                            m[i].rms_value = m[i].correction_ratio
+                                * sqrt(m[i].sum_squared_corrected_values as f64 / 2000.0);
 
-            shared_adc_resources.rms_current_2 = current_2_correction_ratio
-                * sqrt(
-                    shared_adc_resources.sum_squared_current_2 as f64
-                        / shared_adc_resources.count_energy_usage_measurements as f64,
-                );
+                            defmt::println!("RMS {}: {}", m[i].name, m[i].rms_value);
 
-            defmt::println!("RMS Voltage {}", shared_adc_resources.rms_voltage);
-            defmt::println!("RMS Current 1 {}", shared_adc_resources.rms_current_1);
-            defmt::println!("RMS Current 2 {}", shared_adc_resources.rms_current_2);
+                            if m[i].measurement_type == MeasurementTypes::Current {
+                                let power_real = m[0].correction_ratio
+                                    * m[i].correction_ratio
+                                    * (m[i].sum_power as f64 / 2000.0);
 
-            // Calculate real power
+                                defmt::println!("Real power for {}, {}", m[i].name, power_real);
 
-            let power_1_real = voltage_correction_ratio
-                * current_1_correction_ratio
-                * (shared_adc_resources.sum_power_1
-                    / shared_adc_resources.count_energy_usage_measurements as i128)
-                    as f64;
+                                let power_apparent = m[0].rms_value * m[i].rms_value;
 
-            let power_2_real = voltage_correction_ratio
-                * current_2_correction_ratio
-                * (shared_adc_resources.sum_power_2
-                    / shared_adc_resources.count_energy_usage_measurements as i128)
-                    as f64;
+                                defmt::println!(
+                                    "Apparent power for {}, {}",
+                                    m[i].name,
+                                    power_apparent
+                                );
 
-            // Calculate apparent power
+                                let power_factor = power_real / power_apparent;
 
-            let power_1_apparent =
-                shared_adc_resources.rms_voltage * shared_adc_resources.rms_current_1;
-            let power_2_apparent =
-                shared_adc_resources.rms_voltage * shared_adc_resources.rms_current_2;
-
-            // Calculate power factor
-
-            let power_factor_1 = power_1_real / power_1_apparent;
-            let power_factor_2 = power_2_real / power_2_apparent;
-
-            defmt::println!("Real Power 1 {}", power_1_real);
-            defmt::println!("Real Power 2 {}", power_2_real);
-            defmt::println!("Apparent Power 1 {}", power_1_apparent);
-            defmt::println!("Apparent Power 2 {}", power_2_apparent);
-            defmt::println!("Power Factor 1 {}", power_factor_1);
-            defmt::println!("Power Factor 2 {}", power_factor_2);
-            defmt::println!(
-                "Energy Usage Measurements Taken {}",
-                shared_adc_resources.count_energy_usage_measurements
-            );
+                                defmt::println!(
+                                    "Apparent power for {}, {}",
+                                    m[i].name,
+                                    power_factor
+                                );
+                            };
+                        };
+                    }
+                })
+            }
         })
+
+        //defmt::println!("Ready to gather information");
     }
 }
