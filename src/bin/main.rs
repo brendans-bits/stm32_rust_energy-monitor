@@ -19,7 +19,6 @@ mod app {
         },
         dma::{config::DmaConfig, PeripheralToMemory, Stream0, StreamsTuple, Transfer},
         gpio::gpioa,
-        //pac::{self, ADC1, DMA2, TIM3, USART1},
         pac::*,
         prelude::*,
         serial::{Config, Serial, Tx},
@@ -42,7 +41,6 @@ mod app {
         pin: u16,
         measurement_type: MeasurementTypes,
         calibration_value: f64,
-        //buffer: Vec<u16, 10>,
         buffer: u16,
         sum_raw_adc_input: i128,
         adc_offset: i128,
@@ -53,32 +51,11 @@ mod app {
         correction_ratio: f64,
     }
 
-    //impl MeasurementParameters {
-    //    fn new() -> Self {
-    //        Default::default()
-    //    }
-    //}
-
-    //impl Default for MeasurementParameters {
-    //    fn default() -> Self {
-    //        MeasurementParameters {
-    //            pin: 0,
-    //            measurement_type: MeasurementTypes::Current,
-    //            calibration_value: 0.0,
-    //           buffer: Vec::new(),
-    //        }
-    //    }
-    //}
-
     #[shared]
     struct Shared {
         transfer: DMATransfer,
         adc_timer: CounterHz<TIM3>,
         counter: i32,
-        //voltage: MeasurementParameters,
-        //current: MeasurementParameters,
-        adc_value_voltage: u16,
-        adc_value_current: u16,
         measurements: Vec<MeasurementParameters, 8>,
         serial_tx: Tx<USART1>,
     }
@@ -110,19 +87,17 @@ mod app {
 
         let dma = StreamsTuple::new(device.DMA2);
 
-        let config = DmaConfig::default()
+        let config_dma = DmaConfig::default()
             .transfer_complete_interrupt(true)
             .memory_increment(true)
             .double_buffer(false);
 
-        let adc_config = AdcConfig::default()
+        let config_adc = AdcConfig::default()
             .dma(Dma::Continuous)
             .scan(Scan::Enabled);
 
-        let mut adc = Adc::adc1(device.ADC1, true, adc_config);
-        //adc.configure_channel(&pin_voltage, Sequence::One, SampleTime::Cycles_480);
-        //adc.configure_channel(&pin_current_1, Sequence::Two, SampleTime::Cycles_480);
-        //adc.configure_channel(&pin_current_2, Sequence::Three, SampleTime::Cycles_480);
+        let mut adc = Adc::adc1(device.ADC1, true, config_adc);
+
         adc.configure_channel(&pin_0, Sequence::One, SampleTime::Cycles_480);
         adc.configure_channel(&pin_1, Sequence::Two, SampleTime::Cycles_480);
         adc.configure_channel(&pin_2, Sequence::Three, SampleTime::Cycles_480);
@@ -134,7 +109,7 @@ mod app {
 
         let first_buffer = cortex_m::singleton!(: [u16; 8] = [0; 8]).unwrap();
         let second_buffer = Some(cortex_m::singleton!(: [u16; 8] = [0; 8]).unwrap());
-        let transfer = Transfer::init_peripheral_to_memory(dma.0, adc, first_buffer, None, config);
+        let transfer = Transfer::init_peripheral_to_memory(dma.0, adc, first_buffer, None, config_dma);
 
         // Set up Serial
         let tx_pin = gpioa.pa9.into_alternate();
@@ -229,9 +204,6 @@ mod app {
         measurements.push(current_6);
         measurements.push(current_7);
 
-        let mut adc_value_voltage: u16 = 0;
-        let mut adc_value_current: u16 = 0;
-
         let mut timer_step_1_start_measurement_loop = device.TIM2.counter_us(&clocks);
 
         timer_step_1_start_measurement_loop
@@ -250,10 +222,6 @@ mod app {
                 transfer,
                 adc_timer,
                 counter,
-                //voltage,
-                //current,
-                adc_value_current,
-                adc_value_voltage,
                 measurements,
                 serial_tx,
             },
@@ -313,10 +281,10 @@ mod app {
             dma_buffer
         });
 
-        cx.shared.measurements.lock(|measurements| {
-            for i in 0..measurements.len() {
-                let pin = measurements[i].pin as usize;
-                measurements[i].buffer = dma_buffer[pin];
+        cx.shared.measurements.lock(|m| {
+            for i in 0..m.len() {
+                let pin = m[i].pin as usize;
+                m[i].buffer = dma_buffer[pin];
             }
         });
 
