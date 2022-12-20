@@ -237,12 +237,29 @@ mod app {
     // Task 1: Start the ADC timer
     //---------
 
-    #[task(binds=TIM2, shared = [adc_timer], local = [timer_step_1_start_measurement_loop])]
+    #[task(binds=TIM2, shared = [adc_timer, measurements, counter], local = [timer_step_1_start_measurement_loop])]
     fn task_1_start_adc(mut cx: task_1_start_adc::Context) {
         // Clear the interrupt so that the main measurement loop runs again
         cx.local
             .timer_step_1_start_measurement_loop
             .clear_interrupt(Event::Update);
+
+        cx.shared.counter.lock(|counter| {
+            *counter = 0;
+        });
+
+        cx.shared.measurements.lock(|m| {
+            for i in 0..m.len() {
+                m[i].buffer = 0;
+                m[i].sum_raw_adc_input = 0;
+                m[i].adc_offset = 0;
+                m[i].corrected_value = 0;
+                m[i].sum_squared_corrected_values = 0;
+                m[i].sum_power = 0;
+                m[i].rms_value = 0.0;
+                m[i].correction_ratio = 0.0;
+            }
+        });
 
         cx.shared.adc_timer.lock(|adc_timer| {
             adc_timer.listen(Event::Update);
