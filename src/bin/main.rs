@@ -125,9 +125,9 @@ mod app {
         )
         .unwrap();
 
-        let mut adc_timer = device.TIM3.counter_hz(&clocks);
+        let adc_timer = device.TIM3.counter_hz(&clocks);
 
-        let mut counter: i32 = 0;
+        let counter: i32 = 0;
 
         let mut measurements: Vec<MeasurementParameters, 8> = Vec::new();
 
@@ -195,14 +195,14 @@ mod app {
             ..Default::default()
         };
 
-        measurements.push(voltage);
-        measurements.push(current_1);
-        measurements.push(current_2);
-        measurements.push(current_3);
-        measurements.push(current_4);
-        measurements.push(current_5);
-        measurements.push(current_6);
-        measurements.push(current_7);
+        measurements.push(voltage).unwrap();
+        measurements.push(current_1).unwrap();
+        measurements.push(current_2).unwrap();
+        measurements.push(current_3).unwrap();
+        measurements.push(current_4).unwrap();
+        measurements.push(current_5).unwrap();
+        measurements.push(current_6).unwrap();
+        measurements.push(current_7).unwrap();
 
         let mut timer_step_1_start_measurement_loop = device.TIM2.counter_us(&clocks);
 
@@ -310,9 +310,9 @@ mod app {
 
             if counter <= &mut 2000 {
                 //defmt::println!("{}", counter);
-                step_4_calculate_adc_offset::spawn();
+                step_4_calculate_adc_offset::spawn().unwrap();
             } else {
-                step_5_obtain_energy_flow::spawn();
+                step_5_obtain_energy_flow::spawn().unwrap();
             }
         });
 
@@ -335,7 +335,7 @@ mod app {
                         defmt::println!("ADC Offset for {}, {}", m[i].name, m[i].adc_offset)
                     }
                 });
-                step_5_obtain_energy_flow::spawn();
+                step_5_obtain_energy_flow::spawn().unwrap();
             }
         });
     }
