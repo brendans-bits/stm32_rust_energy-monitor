@@ -301,7 +301,7 @@ mod app {
 
         cx.shared.measurements.lock(|m| {
             for i in 0..m.len() {
-                let pin = m[i].pin as usize;
+                let pin :usize = m[i].pin as usize;
                 m[i].buffer = dma_buffer[pin];
             }
         });
@@ -352,7 +352,7 @@ mod app {
             }
 
             for i in 1..m.len() {
-                let instantaneous_power = m[i].corrected_value * m[0].corrected_value;
+                let instantaneous_power :i128 = m[i].corrected_value * m[0].corrected_value;
                 m[i].sum_power += instantaneous_power;
             }
         });
@@ -376,13 +376,13 @@ mod app {
                             defmt::println!("RMS {}: {}", m[i].name, m[i].rms_value);
 
                             if m[i].measurement_type == MeasurementTypes::Current {
-                                let power_real = m[0].correction_ratio
+                                let power_real :f64 = m[0].correction_ratio
                                     * m[i].correction_ratio
                                     * (m[i].sum_power as f64 / 2000.0);
 
                                 defmt::println!("Real power for {}, {}", m[i].name, power_real);
 
-                                let power_apparent = m[0].rms_value * m[i].rms_value;
+                                let power_apparent :f64 = m[0].rms_value * m[i].rms_value;
 
                                 defmt::println!(
                                     "Apparent power for {}, {}",
@@ -390,7 +390,7 @@ mod app {
                                     power_apparent
                                 );
 
-                                let power_factor = power_real / power_apparent;
+                                let power_factor :f64 = power_real / power_apparent;
 
                                 defmt::println!(
                                     "Apparent power for {}, {}",
