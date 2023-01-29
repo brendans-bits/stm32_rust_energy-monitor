@@ -1,15 +1,16 @@
 //#![deny(unsafe_code)]
 #![no_main]
 #![no_std]
-#![allow(unused_imports)]
+#![warn(unused_imports)]
+#![warn(clippy::all)]
 
-use rtic::app;
+//use rtic::app;
 use stm32_rust_energy_monitor as _; // global logger + panicking-behavior + memory layout
 
 #[rtic::app(device = stm32f4xx_hal::pac, dispatchers = [EXTI0])]
 mod app {
 
-    use core::fmt::Write;
+    //use core::fmt::Write;
     use heapless::Vec;
     use libm::sqrt;
     use stm32f4xx_hal::{
@@ -18,8 +19,8 @@ mod app {
             Adc,
         },
         dma::{config::DmaConfig, PeripheralToMemory, Stream0, StreamsTuple, Transfer},
-        gpio::gpioa,
-        pac::*,
+        //gpio::gpioa,
+        pac::{ADC1, DMA2, TIM2, TIM3, USART1, interrupt},
         prelude::*,
         serial::{Config, Serial, Tx},
         timer::{CounterHz, CounterUs, Event},
@@ -306,7 +307,7 @@ mod app {
         });
 
         cx.shared.counter.lock(|counter| {
-            *counter = *counter + 1;
+            *counter += 1;
 
             if counter <= &mut 2000 {
                 //defmt::println!("{}", counter);
@@ -323,7 +324,7 @@ mod app {
     fn step_4_calculate_adc_offset(mut cx: step_4_calculate_adc_offset::Context) {
         cx.shared.measurements.lock(|m| {
             for i in 0..m.len() {
-                m[i].sum_raw_adc_input = m[i].sum_raw_adc_input + m[i].buffer as i128;
+                m[i].sum_raw_adc_input += m[i].buffer as i128;
             }
         });
 
@@ -332,7 +333,7 @@ mod app {
                 cx.shared.measurements.lock(|m| {
                     for i in 0..m.len() {
                         m[i].adc_offset = m[i].sum_raw_adc_input / *counter as i128;
-                        defmt::println!("ADC Offset for {}, {}", m[i].name, m[i].adc_offset)
+                        defmt::println!("ADC Offset for {}, {}", m[i].name, m[i].adc_offset);
                     }
                 });
                 step_5_obtain_energy_flow::spawn().unwrap();
@@ -347,13 +348,12 @@ mod app {
                 m[i].corrected_value = m[i].buffer as i128 - m[i].adc_offset;
 
                 let squared_corrected_value = m[i].corrected_value * m[i].corrected_value;
-                m[i].sum_squared_corrected_values =
-                    m[i].sum_squared_corrected_values + squared_corrected_value;
+                m[i].sum_squared_corrected_values += squared_corrected_value;
             }
 
             for i in 1..m.len() {
                 let instantaneous_power = m[i].corrected_value * m[0].corrected_value;
-                m[i].sum_power = m[i].sum_power + instantaneous_power;
+                m[i].sum_power += instantaneous_power;
             }
         });
 
@@ -400,7 +400,7 @@ mod app {
                             };
                         };
                     }
-                })
+                });
             }
         })
 
